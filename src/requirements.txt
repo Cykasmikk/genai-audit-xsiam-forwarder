@@ -1,0 +1,8 @@
+# Used by GCP Cloud Functions build (Cloud Build auto-installs).
+# AWS Lambda gets boto3 + urllib3 from the python3.12 runtime, so this file
+# is harmless ballast in the AWS zip.
+urllib3>=1.26,<3
+google-cloud-firestore>=2.16
+google-cloud-secret-manager>=2.20
+google-cloud-pubsub>=2.21
+functions-framework>=3.5

@@ -1,0 +1,58 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: src/requirements.txt
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r src/requirements.txt
+          pip install boto3
+      - name: Syntax check
+        run: |
+          python -c "
+          import ast, pathlib, sys
+          ok = True
+          for p in pathlib.Path('src').rglob('*.py'):
+              try: ast.parse(p.read_text())
+              except SyntaxError as e: ok = False; print(f'FAIL {p}: {e}')
+          sys.exit(0 if ok else 1)
+          "
+      - name: Smoke test (dedupe + S3 + Pub/Sub egress)
+        env:
+          PYTHONPATH: src
+        run: python tests/smoke.py
+
+  terraform:
+    name: terraform
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        stack: [aws, gcp]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+      - name: fmt check
+        run: terraform -chdir=terraform/${{ matrix.stack }} fmt -check
+      - name: init (no backend)
+        run: terraform -chdir=terraform/${{ matrix.stack }} init -backend=false -input=false
+      - name: validate
+        run: terraform -chdir=terraform/${{ matrix.stack }} validate

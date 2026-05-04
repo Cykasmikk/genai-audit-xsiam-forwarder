@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Terraform
+**/.terraform/
+**/.terraform.lock.hcl
+**/.build/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+!example.tfvars
+
+# Local secrets (sanity guard)
+*-credentials.json
+*.pem
+*.key
+.env
+.env.*
+!.env.example
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Tooling
+.claude/

@@ -166,7 +166,10 @@ def test_s3_first_run():
     assert put["ContentType"] == "application/x-ndjson"
     assert put["ContentEncoding"] == "gzip"
     assert put["ServerSideEncryption"] == "AES256"
-    assert put["Key"].startswith("claude-compliance/2026/05/04/")
+    # S3 key uses wallclock at write time (matches CloudTrail/GuardDuty
+    # partition convention), not the event timestamp.
+    today = datetime.now(timezone.utc).strftime("%Y/%m/%d")
+    assert put["Key"].startswith(f"claude-compliance/{today}/"), put["Key"]
     assert put["Key"].endswith(".jsonl.gz")
     lines = gzip.decompress(put["Body"]).decode().strip().split("\n")
     parsed = [json.loads(line) for line in lines]

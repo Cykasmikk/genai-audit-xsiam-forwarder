@@ -1,16 +1,22 @@
 # genai-audit-xsiam-forwarder
 
-Forwards GenAI platform audit logs into **Cortex XSIAM** using the cloud-
-native ingestion patterns documented and reference-architected by Palo Alto
-Networks. Vendor-adapter architecture — drop in a new adapter to add another
-provider.
+Forwards GenAI platform audit logs **and conversation content** into
+**Cortex XSIAM** using the cloud-native ingestion patterns documented by
+Palo Alto Networks. Vendor-adapter architecture — drop in a new adapter
+to add another provider.
 
-**Currently supported vendors:**
+**Full-take coverage** is the design goal: admin/auth metadata, resource
+activity, AND prompt/response content for SOC investigations. Five feeds
+across two vendors plus an OpenTelemetry collector for Claude Code /
+Cowork inference.
 
-| Vendor | API | Spec conformance |
-|---|---|---|
-| Anthropic | Compliance API — Activity Feed (`/v1/compliance/activities`) | Rev J, 2026-04-20 |
-| OpenAI    | Audit Logs API (`/v1/organization/audit_logs`) | platform.openai.com /docs/api-reference/audit-logs |
+| Feed | Source | What it captures | Spec conformance |
+|---|---|---|---|
+| `anthropic` | Compliance API — Activity Feed (`/v1/compliance/activities`) | Admin/auth/system events, resource activity (~200 types) | Rev J 2026-04-20 |
+| `anthropic_chats` | Compliance API — chat content (`/v1/compliance/apps/chats/{id}/messages`) | **Full chat transcripts** including prompts, responses, file refs, artifacts | Rev J 2026-04-20 |
+| `openai` | Audit Logs API (`/v1/organization/audit_logs`) | Admin/auth events (51 types) | platform.openai.com /docs/api-reference/audit-logs |
+| `openai_conversations` | Compliance Logs Platform — conversation logs | **Full ChatGPT conversation transcripts** (Enterprise/Edu) | ⚠️ partial spec — see [Coverage gaps](#coverage-gaps) |
+| Cowork OTel | OTel Collector receiving OTLP from Claude Cowork + Claude Code agents | **Prompts, tool calls, file access, model + token + cost per request** | Standard OTel logs/metrics |
 
 **Ingest paths (per cloud):**
 
@@ -20,12 +26,51 @@ provider.
 
 There is no native Anthropic or OpenAI integration in XSIAM, and no vendor-published XSIAM connector. This repo is the custom forwarder.
 
-## What this captures vs. what it does not
+## Coverage matrix
 
-| Vendor | Captured (this repo) | Out of scope |
+| What you want to forward | Feed | Notes |
 |---|---|---|
-| Anthropic | Activity Feed: auth, admin/system, resource activity, compliance API self-audit | Inference content (prompts/responses) — see [Cowork OTel](https://support.claude.com/en/articles/14477985-monitor-claude-cowork-activity-with-opentelemetry) |
-| OpenAI | Audit Logs: API key lifecycle, invites, user/SA lifecycle, login success/failure, org config, project lifecycle, role/SCIM/IP allowlist | Inference content (prompts/completions) — separate concern |
+| Anthropic admin/auth/resource events | `anthropic` | Admin key (`sk-ant-admin01-`) sufficient |
+| Claude.ai chat prompts + responses | `anthropic_chats` | **Compliance Access Key (`sk-ant-api01-`) required**, Admin keys won't work |
+| Claude.ai file uploads (binary content) | `anthropic_chats` with `ANTHROPIC_FETCH_FILE_CONTENT=1` | Off by default — see [Volume warning](#volume-warning) |
+| Claude API (programmatic) prompts/responses | **Not available** server-side | Anthropic does not retain API call bodies — log application-side or via a proxy |
+| Claude Code prompts + tool calls | Cowork OTel collector | Set `OTEL_LOG_USER_PROMPTS=1` + `OTEL_LOG_TOOL_DETAILS=1` in managed settings |
+| Cowork prompts + tool calls + approvals | Cowork OTel collector | Configured centrally in Anthropic admin portal |
+| OpenAI admin/auth/project events | `openai` | Admin key (`sk-admin-`) |
+| ChatGPT Enterprise/Edu conversation prompts + responses | `openai_conversations` | **⚠️ Partial spec — endpoint not publicly documented**, see [Coverage gaps](#coverage-gaps) |
+| OpenAI API (programmatic) prompts/responses | **Not available** server-side | Use OpenAI's `store=true` Responses API or proxy-side logging |
+| AWS Bedrock Claude usage | Out of scope | CloudTrail Bedrock data events (separate XSIAM data source) |
+| Azure OpenAI usage | Out of scope | Azure Monitor / Activity Logs (separate XSIAM data source) |
+
+### Coverage gaps
+
+1. **OpenAI Conversations endpoint path is not publicly documented.**
+   The `openai_conversations` adapter ships with educated defaults
+   aligned with the sibling Audit Logs API (Authorization Bearer,
+   `effective_at[gte]/[lte]` Unix-seconds bracket filter, `after`
+   pagination), marked with `TODO(openai-conversations-spec)`. Either
+   get the spec from your OpenAI Enterprise rep and override
+   `OPENAI_CONVERSATIONS_PATH` if needed, OR use Palo Alto Networks'
+   native XSIAM "OpenAI ChatGPT Enterprise Compliance" integration
+   (announced 2026) — verify availability with your XSIAM TAM.
+
+2. **Programmatic API call bodies** (Claude API, OpenAI API) are not
+   retained by either vendor. To audit them, you need application-side
+   logging or a logging proxy in front of the API.
+
+### Volume warning
+
+The two content feeds (`anthropic_chats`, `openai_conversations`) and
+the Cowork OTel collector all carry full prompt/response text. Volume
+is 10–1000× the audit feeds. Enable them only after you've reviewed:
+
+- **XSIAM ingestion costs** — pricing is volume-based.
+- **PII / data-classification policy** — prompts can contain regulated
+  data. Consider XSIAM-side redaction processors or scope feeds to
+  specific datasets with stricter access control.
+- **First-run lookback** — the default 60-min window is sane for audit
+  feeds but `INITIAL_LOOKBACK_MINUTES=10` is safer for first deploy of
+  content feeds in a busy org.
 
 ## Architecture
 
@@ -188,7 +233,10 @@ terraform/aws/                  Per-vendor Lambda/EventBridge/SQS/Secret +
                                 shared bucket/state-table/IAM-role
 terraform/gcp/                  Per-vendor Function/Scheduler/Pub-Sub topic+sub/Secret +
                                 shared Firestore/SA
-tests/smoke.py                  31 deterministic tests (no AWS/GCP creds needed)
+cowork-otel/                    Standalone OTel Collector deployment for
+                                Cowork + Claude Code (separate from polling
+                                forwarder). See cowork-otel/README.md.
+tests/smoke.py                  47 deterministic tests (no AWS/GCP creds needed)
 .github/workflows/ci.yml        Python smoke + Terraform validate per PR
 ```
 
@@ -197,15 +245,23 @@ tests/smoke.py                  31 deterministic tests (no AWS/GCP creds needed)
 ```hcl
 # terraform/aws/example.tfvars (gitignored)
 vendors = {
-  anthropic = { schedule_minutes = 5 }
-  openai    = { schedule_minutes = 5 }
+  anthropic            = { schedule_minutes = 5 }
+  anthropic_chats      = { schedule_minutes = 5, initial_lookback_minutes = 10 }
+  openai               = { schedule_minutes = 5 }
+  openai_conversations = { schedule_minutes = 5, initial_lookback_minutes = 10 }
 }
 api_keys = {
-  anthropic = "sk-ant-admin01-..."
-  openai    = "sk-admin-..."
+  anthropic            = "sk-ant-admin01-..."  # Admin key — Activity Feed only
+  anthropic_chats      = "sk-ant-api01-..."    # Compliance Access Key — content
+  openai               = "sk-admin-..."        # Admin key — Audit Logs
+  openai_conversations = "sk-admin-..."        # Admin key — Conversations
 }
 xsiam_aws_account_id = "123456789012"
 ```
+
+To deploy a subset of feeds, omit them from both maps. Each feed gets its
+own Lambda, SQS queue, and S3 prefix; XSIAM operators configure one data
+source per feed.
 
 ```bash
 cd terraform/aws
@@ -234,12 +290,16 @@ terraform output -raw xsiam_external_id
 project_id = "my-soc-project"
 region     = "us-central1"
 vendors = {
-  anthropic = { schedule_minutes = 5 }
-  openai    = { schedule_minutes = 5 }
+  anthropic            = { schedule_minutes = 5 }
+  anthropic_chats      = { schedule_minutes = 5, initial_lookback_minutes = 10 }
+  openai               = { schedule_minutes = 5 }
+  openai_conversations = { schedule_minutes = 5, initial_lookback_minutes = 10 }
 }
 api_keys = {
-  anthropic = "sk-ant-admin01-..."
-  openai    = "sk-admin-..."
+  anthropic            = "sk-ant-admin01-..."
+  anthropic_chats      = "sk-ant-api01-..."
+  openai               = "sk-admin-..."
+  openai_conversations = "sk-admin-..."
 }
 ```
 

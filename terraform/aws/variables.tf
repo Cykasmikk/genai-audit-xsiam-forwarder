@@ -16,7 +16,11 @@ variable "vendors" {
     creates a dedicated Lambda, EventBridge schedule, secret, SQS audit
     queue, and S3 prefix. Only listed vendors are deployed.
 
-    Supported vendor keys: "anthropic", "openai".
+    Supported vendor keys: "anthropic" (Compliance API Activity Feed),
+    "anthropic_chats" (Compliance API chat content — needs sk-ant-api01-
+    Compliance Access Key), "openai" (Audit Logs API), "openai_conversations"
+    (Compliance Logs Platform conversation logs — partial spec, see
+    src/forwarder/vendors/openai_conversations.py docstring).
 
     API keys are passed separately via var.api_keys (sensitive). Terraform
     forbids sensitive values as for_each keys, so they're split.
@@ -27,8 +31,8 @@ variable "vendors" {
   }))
 
   validation {
-    condition     = alltrue([for k in keys(var.vendors) : contains(["anthropic", "openai"], k)])
-    error_message = "vendors map keys must be one of: anthropic, openai."
+    condition     = alltrue([for k in keys(var.vendors) : contains(["anthropic", "anthropic_chats", "openai", "openai_conversations"], k)])
+    error_message = "vendors map keys must be one of: anthropic, anthropic_chats, openai, openai_conversations."
   }
   validation {
     condition     = length(var.vendors) > 0
@@ -47,8 +51,8 @@ variable "api_keys" {
   sensitive   = true
 
   validation {
-    condition     = alltrue([for k in keys(var.api_keys) : contains(["anthropic", "openai"], k)])
-    error_message = "api_keys map keys must be one of: anthropic, openai."
+    condition     = alltrue([for k in keys(var.api_keys) : contains(["anthropic", "anthropic_chats", "openai", "openai_conversations"], k)])
+    error_message = "api_keys map keys must be one of: anthropic, anthropic_chats, openai, openai_conversations."
   }
 }
 

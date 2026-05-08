@@ -1,0 +1,111 @@
+# OpenTelemetry Collector config — Cowork / Claude Code → XSIAM.
+#
+# Templated by Terraform; expects substitution of:
+#   ${cloud}           — "aws" or "gcp"
+#   ${aws_region}      — AWS region (only used when cloud=aws)
+#   ${aws_bucket}      — S3 bucket name (only used when cloud=aws)
+#   ${aws_prefix}      — S3 key prefix (default "cowork/")
+#   ${gcp_project}     — GCP project id (only used when cloud=gcp)
+#   ${gcp_topic}       — Pub/Sub topic short name (only used when cloud=gcp)
+#
+# Auth is enforced by the bearertokenauth extension reading from the
+# OTEL_AUTH_TOKEN env var (sourced from a Secrets Manager / Secret Manager
+# value at task / service start).
+
+extensions:
+  bearertokenauth:
+    scheme: "Bearer"
+    token: "$${env:OTEL_AUTH_TOKEN}"
+  health_check:
+    endpoint: "0.0.0.0:13133"
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: "0.0.0.0:4318"
+        auth:
+          authenticator: bearertokenauth
+        # Cowork emits OTel logs (events). Claude Code emits both logs
+        # and metrics. We accept everything on this listener.
+      grpc:
+        endpoint: "0.0.0.0:4317"
+        auth:
+          authenticator: bearertokenauth
+
+processors:
+  # Batch to match XSIAM ingest sweet spot (a few thousand events per
+  # object, well under the 5MB-per-event / 9.5MB-per-batch HTTP collector
+  # cap for the fallback path).
+  batch:
+    send_batch_size: 1000
+    send_batch_max_size: 5000
+    timeout: 30s
+  # Attach a static `_vendor` resource attribute so XSIAM-side queries
+  # can disambiguate Cowork events from any future OTel feeds without
+  # reading payloads.
+  resource:
+    attributes:
+      - key: _vendor
+        value: "anthropic"
+        action: upsert
+      - key: _product
+        value: "claude_cowork"
+        action: upsert
+  # Drop Authorization headers if the SDK happened to capture them in
+  # span attrs — defense in depth against accidental token leakage into
+  # XSIAM.
+  attributes:
+    actions:
+      - key: http.request.header.authorization
+        action: delete
+      - key: http.request.header.proxy_authorization
+        action: delete
+
+%{ if cloud == "aws" ~}
+exporters:
+  awss3:
+    s3uploader:
+      region: "${aws_region}"
+      s3_bucket: "${aws_bucket}"
+      s3_prefix: "${aws_prefix}"
+      file_prefix: "cowork-"
+    encoding: file_exporter/json
+    sending_queue:
+      enabled: true
+      queue_size: 5000
+%{ endif ~}
+%{ if cloud == "gcp" ~}
+exporters:
+  googlecloudpubsub:
+    project: "${gcp_project}"
+    topic: "projects/${gcp_project}/topics/${gcp_topic}"
+    encoding: otlp_json
+    sending_queue:
+      enabled: true
+      queue_size: 5000
+%{ endif ~}
+
+service:
+  extensions: [bearertokenauth, health_check]
+  pipelines:
+    logs:
+      receivers: [otlp]
+      processors: [resource, attributes, batch]
+      exporters:
+%{ if cloud == "aws" ~}
+        - awss3
+%{ endif ~}
+%{ if cloud == "gcp" ~}
+        - googlecloudpubsub
+%{ endif ~}
+    metrics:
+      receivers: [otlp]
+      processors: [resource, batch]
+      exporters:
+%{ if cloud == "aws" ~}
+        - awss3
+%{ endif ~}
+%{ if cloud == "gcp" ~}
+        - googlecloudpubsub
+%{ endif ~}

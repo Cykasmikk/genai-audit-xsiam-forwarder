@@ -55,6 +55,10 @@ from forwarder.egress.s3 import S3Egress
 from forwarder.gcp_handler import handler as gcp_handler  # noqa: F401
 from forwarder.state import ForwarderState, StateStore
 from forwarder.vendors import AuditEvent
+from forwarder.vendors.anthropic_chat_content import (
+    AnthropicChatContentAPIError,
+    AnthropicChatContentClient,
+)
 from forwarder.vendors.anthropic_compliance import (
     AnthropicComplianceAPIError,
     AnthropicComplianceClient,
@@ -64,6 +68,10 @@ from forwarder.vendors.openai_audit import (
     AUDIT_LOGS_PATH as OPENAI_PATH,
     OpenAIAuditAPIError,
     OpenAIAuditClient,
+)
+from forwarder.vendors.openai_conversations import (
+    OpenAIConversationsAPIError,
+    OpenAIConversationsClient,
 )
 
 
@@ -910,6 +918,331 @@ def test_parallel_execution_no_contention():
     print("OK test_parallel_execution_no_contention")
 
 
+# ── Anthropic chat content (anthropic_chats) ──────────────────────────────
+
+
+def test_anthropic_chats_requires_compliance_access_key():
+    # Admin keys are explicitly rejected — they only authorize Activity Feed
+    try:
+        AnthropicChatContentClient("sk-ant-admin01-test")
+        raise AssertionError("admin key should be rejected for content endpoints")
+    except ValueError as e:
+        assert "Compliance Access Key" in str(e)
+        assert "sk-ant-api01-" in str(e)
+    AnthropicChatContentClient("sk-ant-api01-test")  # accepts the right key
+    print("OK test_anthropic_chats_requires_compliance_access_key")
+
+
+def test_anthropic_chats_emits_one_event_per_message():
+    list_resp = json.dumps(
+        {
+            "data": [{"id": "claude_chat_abc", "updated_at": _iso(NOW - timedelta(minutes=5))}],
+            "has_more": False,
+        }
+    ).encode()
+    chat_resp = json.dumps(
+        {
+            "id": "claude_chat_abc",
+            "name": "Q3 plan",
+            "organization_id": "org_x",
+            "project_id": "claude_proj_abc",
+            "user": {"id": "user_alice", "email_address": "alice@example.com"},
+            "chat_messages": [
+                {"id": "msg_1", "role": "user", "created_at": _iso(NOW - timedelta(minutes=4)),
+                 "content": [{"type": "text", "text": "what's the plan?"}]},
+                {"id": "msg_2", "role": "assistant", "created_at": _iso(NOW - timedelta(minutes=3)),
+                 "content": [{"type": "text", "text": "here's the plan..."}]},
+            ],
+        }
+    ).encode()
+    http = ScriptedHttp([(200, list_resp), (200, chat_resp)])
+    c = AnthropicChatContentClient("sk-ant-api01-test", http=http)
+    events = list(c.fetch_window(NOW - timedelta(hours=1), NOW))
+    assert len(events) == 2
+    assert events[0].vendor == "anthropic_chats"
+    assert events[0].id == "msg_1" and events[1].id == "msg_2"
+    # Each event wraps {chat: {...meta...}, message: {...content...}}
+    assert events[0].raw["chat"]["id"] == "claude_chat_abc"
+    assert events[0].raw["message"]["role"] == "user"
+    assert events[1].raw["message"]["role"] == "assistant"
+    # Chat metadata excludes the messages array (it's split out per-event)
+    assert "chat_messages" not in events[0].raw["chat"]
+    print("OK test_anthropic_chats_emits_one_event_per_message")
+
+
+def test_anthropic_chats_uses_updated_at_filter():
+    body = json.dumps({"data": [], "has_more": False}).encode()
+    http = CapturingHttp((200, body))
+    c = AnthropicChatContentClient("sk-ant-api01-test", http=http)
+    list(c.fetch_window(NOW - timedelta(minutes=10), NOW))
+    parsed = urlparse(http.requests[0]["url"])
+    assert parsed.path == "/v1/compliance/apps/chats"
+    qs = parse_qs(parsed.query)
+    assert "updated_at.gte" in qs and "updated_at.lte" in qs
+    print("OK test_anthropic_chats_uses_updated_at_filter")
+
+
+def test_anthropic_chats_404_message():
+    c = AnthropicChatContentClient("sk-ant-api01-test", http=StaticHttp(404, b"nope"))
+    try:
+        list(c.fetch_window(NOW - timedelta(minutes=5), NOW))
+        raise AssertionError
+    except AnthropicChatContentAPIError as e:
+        assert "/v1/compliance/apps/chats" in str(e)
+        assert "ANTHROPIC_CHATS_LIST_PATH" in str(e)
+    print("OK test_anthropic_chats_404_message")
+
+
+def test_anthropic_chats_403_warns_about_admin_key():
+    c = AnthropicChatContentClient("sk-ant-api01-test", http=StaticHttp(403, b"forbidden"))
+    try:
+        list(c.fetch_window(NOW - timedelta(minutes=5), NOW))
+        raise AssertionError
+    except AnthropicChatContentAPIError as e:
+        assert "Compliance Access Key" in str(e)
+        assert "Admin key" in str(e) or "admin key" in str(e).lower()
+    print("OK test_anthropic_chats_403_warns_about_admin_key")
+
+
+def test_anthropic_chats_skips_individual_failed_chat():
+    # If one chat 500s, the run should skip it and continue, not abort.
+    list_resp = json.dumps(
+        {
+            "data": [
+                {"id": "claude_chat_bad", "updated_at": _iso(NOW)},
+                {"id": "claude_chat_good", "updated_at": _iso(NOW)},
+            ],
+            "has_more": False,
+        }
+    ).encode()
+    good_resp = json.dumps(
+        {
+            "id": "claude_chat_good",
+            "user": {"id": "u"},
+            "chat_messages": [{"id": "msg_g", "role": "user",
+                               "created_at": _iso(NOW), "content": []}],
+        }
+    ).encode()
+    # 4 attempts of 500 = exhausted retries on the bad chat
+    pages = [(200, list_resp)] + [(500, b"bork")] * 4 + [(200, good_resp)]
+    http = ScriptedHttp(pages)
+    c = AnthropicChatContentClient("sk-ant-api01-test", http=http)
+    events = list(c.fetch_window(NOW - timedelta(hours=1), NOW))
+    assert len(events) == 1 and events[0].id == "msg_g"
+    print("OK test_anthropic_chats_skips_individual_failed_chat")
+
+
+# ── OpenAI Conversations (openai_conversations) ────────────────────────────
+
+
+def test_openai_conversations_admin_key_required():
+    OpenAIConversationsClient("sk-admin-test")
+    for bad in ("sk-test", "sk-ant-admin01-test"):
+        try:
+            OpenAIConversationsClient(bad)
+            raise AssertionError
+        except ValueError as e:
+            assert "sk-admin-" in str(e)
+    print("OK test_openai_conversations_admin_key_required")
+
+
+def test_openai_conversations_handles_per_message_response():
+    # If the spec returns flat per-message records.
+    body = json.dumps(
+        {
+            "data": [
+                {"id": "msg-1", "effective_at": _unix(NOW - timedelta(minutes=2)),
+                 "role": "user", "content": "hi"},
+                {"id": "msg-2", "effective_at": _unix(NOW - timedelta(minutes=1)),
+                 "role": "assistant", "content": "hello"},
+            ],
+            "has_more": False,
+        }
+    ).encode()
+    http = CapturingHttp((200, body))
+    c = OpenAIConversationsClient("sk-admin-test", http=http)
+    events = list(c.fetch_window(NOW - timedelta(minutes=10), NOW))
+    assert len(events) == 2
+    assert events[0].id == "msg-1" and events[1].id == "msg-2"
+    assert events[0].vendor == "openai_conversations"
+    print("OK test_openai_conversations_handles_per_message_response")
+
+
+def test_openai_conversations_handles_per_conversation_response():
+    # If the spec returns conversation-level records with embedded messages.
+    body = json.dumps(
+        {
+            "data": [
+                {
+                    "id": "conv-abc",
+                    "effective_at": _unix(NOW - timedelta(minutes=5)),
+                    "workspace_id": "ws-1",
+                    "messages": [
+                        {"id": "m1", "effective_at": _unix(NOW - timedelta(minutes=5)),
+                         "role": "user", "content": "q"},
+                        {"id": "m2", "effective_at": _unix(NOW - timedelta(minutes=4)),
+                         "role": "assistant", "content": "a"},
+                    ],
+                }
+            ],
+            "has_more": False,
+        }
+    ).encode()
+    http = CapturingHttp((200, body))
+    c = OpenAIConversationsClient("sk-admin-test", http=http)
+    events = list(c.fetch_window(NOW - timedelta(minutes=10), NOW))
+    assert len(events) == 2
+    assert events[0].id == "m1" and events[1].id == "m2"
+    # Each event wraps {conversation: meta, message: ...}
+    assert events[0].raw["conversation"]["id"] == "conv-abc"
+    assert events[0].raw["message"]["role"] == "user"
+    print("OK test_openai_conversations_handles_per_conversation_response")
+
+
+def test_openai_conversations_synthesizes_id_when_missing():
+    # If the spec is vague and a record arrives without id, dedupe must
+    # still work — adapter synthesizes a stable hash.
+    body = json.dumps(
+        {
+            "data": [{"effective_at": _unix(NOW), "role": "user", "content": "x"}],
+            "has_more": False,
+        }
+    ).encode()
+    http = CapturingHttp((200, body))
+    c = OpenAIConversationsClient("sk-admin-test", http=http)
+    events = list(c.fetch_window(NOW - timedelta(minutes=10), NOW))
+    assert len(events) == 1
+    assert events[0].id.startswith("synthetic_")
+    print("OK test_openai_conversations_synthesizes_id_when_missing")
+
+
+def test_openai_conversations_request_uses_bracket_filter():
+    body = json.dumps({"data": [], "has_more": False}).encode()
+    http = CapturingHttp((200, body))
+    c = OpenAIConversationsClient("sk-admin-test", workspace_id="ws-1", http=http)
+    list(c.fetch_window(NOW - timedelta(minutes=10), NOW))
+    parsed = urlparse(http.requests[0]["url"])
+    qs = parse_qs(parsed.query)
+    # Same bracketed Unix-seconds filter as audit logs
+    assert "effective_at[gte]" in qs and "effective_at[lte]" in qs
+    assert qs["workspace_id"] == ["ws-1"]
+    assert http.requests[0]["headers"]["Authorization"] == "Bearer sk-admin-test"
+    print("OK test_openai_conversations_request_uses_bracket_filter")
+
+
+def test_openai_conversations_404_message_points_at_palo_native():
+    c = OpenAIConversationsClient("sk-admin-test", http=StaticHttp(404, b"nope"))
+    try:
+        list(c.fetch_window(NOW - timedelta(minutes=5), NOW))
+        raise AssertionError
+    except OpenAIConversationsAPIError as e:
+        # Help operators find the alternative
+        assert "Palo Alto" in str(e) or "palo" in str(e).lower()
+        assert "OPENAI_CONVERSATIONS_PATH" in str(e)
+    print("OK test_openai_conversations_404_message_points_at_palo_native")
+
+
+# ── Cross-vendor with all four feeds ───────────────────────────────────────
+
+
+def test_pubsub_emits_vendor_attribute_for_all_four():
+    """Pub/Sub egress must tag every message with vendor= so XSIAM can route."""
+    cases = [
+        ("anthropic", ANTHROPIC_EVENTS[0]),
+        ("anthropic_chats", {
+            "chat": {"id": "claude_chat_abc", "organization_id": "org_x",
+                     "project_id": "p1", "user": {"id": "user_alice"}},
+            "message": {"id": "msg_1", "role": "user",
+                        "created_at": _iso(NOW), "content": []},
+        }),
+        ("openai", OPENAI_EVENTS[0]),
+        ("openai_conversations", {
+            "conversation": {"id": "conv-abc", "workspace_id": "ws-1"},
+            "message": {"id": "msg_1", "role": "user",
+                        "effective_at": _unix(NOW), "model": "gpt-4o"},
+        }),
+    ]
+    for vendor, ev in cases:
+        pub = FakePublisher()
+        e = PubSubEgress("p", "t", vendor=vendor, publisher=pub)
+        e.send([ev])
+        assert pub.published[0]["attrs"]["vendor"] == vendor, vendor
+    print("OK test_pubsub_emits_vendor_attribute_for_all_four")
+
+
+def test_pubsub_anthropic_chats_attributes():
+    pub = FakePublisher()
+    e = PubSubEgress("p", "t", vendor="anthropic_chats", publisher=pub)
+    ev = {
+        "chat": {"id": "claude_chat_abc", "organization_id": "org_x",
+                 "project_id": "p1", "user": {"id": "user_alice"}},
+        "message": {"id": "msg_1", "role": "user",
+                    "created_at": _iso(NOW), "content": []},
+    }
+    e.send([ev])
+    a = pub.published[0]["attrs"]
+    assert a["vendor"] == "anthropic_chats"
+    assert a["chat_id"] == "claude_chat_abc"
+    assert a["organization_id"] == "org_x"
+    assert a["project_id"] == "p1"
+    assert a["actor_user_id"] == "user_alice"
+    assert a["message_role"] == "user"
+    print("OK test_pubsub_anthropic_chats_attributes")
+
+
+def test_pubsub_openai_conversations_attributes():
+    pub = FakePublisher()
+    e = PubSubEgress("p", "t", vendor="openai_conversations", publisher=pub)
+    ev = {
+        "conversation": {"id": "conv-abc", "workspace_id": "ws-1"},
+        "message": {"id": "msg_1", "role": "assistant",
+                    "effective_at": _unix(NOW), "model": "gpt-4o"},
+    }
+    e.send([ev])
+    a = pub.published[0]["attrs"]
+    assert a["vendor"] == "openai_conversations"
+    assert a["conversation_id"] == "conv-abc"
+    assert a["workspace_id"] == "ws-1"
+    assert a["model"] == "gpt-4o"
+    assert a["message_role"] == "assistant"
+    print("OK test_pubsub_openai_conversations_attributes")
+
+
+def test_http_envelope_for_chats_and_conversations():
+    """HTTP fallback envelope picks the right _time field for wrapped payloads."""
+    # anthropic_chats
+    http = CapturingHttp((202, b""))
+    e = HttpEgress(HttpEgressConfig(url="https://col/", token="t",
+                                    vendor="anthropic_chats"), http=http)
+    ev = {
+        "chat": {"id": "c"},
+        "message": {"id": "m1", "role": "user",
+                    "created_at": "2026-05-08T10:00:00Z", "content": []},
+    }
+    e.send([ev])
+    body = json.loads(gzip.decompress(http.requests[0]["body"]).decode())
+    assert body[0]["_vendor"] == "anthropic_chats"
+    assert body[0]["_product"] == "anthropic_chats_audit_log"
+    assert body[0]["_time"] == "2026-05-08T10:00:00Z"
+    assert body[0]["_event"] == "claude_chat_message"
+
+    # openai_conversations
+    http = CapturingHttp((202, b""))
+    e = HttpEgress(HttpEgressConfig(url="https://col/", token="t",
+                                    vendor="openai_conversations"), http=http)
+    ev = {
+        "conversation": {"id": "c"},
+        "message": {"id": "m1", "role": "user", "effective_at": _unix(NOW)},
+    }
+    e.send([ev])
+    body = json.loads(gzip.decompress(http.requests[0]["body"]).decode())
+    assert body[0]["_vendor"] == "openai_conversations"
+    assert body[0]["_event"] == "openai_conversation_message"
+    parsed = datetime.fromisoformat(body[0]["_time"].replace("Z", "+00:00"))
+    assert int(parsed.timestamp()) == int(NOW.timestamp())
+    print("OK test_http_envelope_for_chats_and_conversations")
+
+
 def test_parallel_repeated_runs_dedupe_correctly():
     """Stress: same vendor run twice in parallel against shared state. Even
     if the cap-of-1 is bypassed (e.g. a misconfigured deploy), the dedupe
@@ -1004,6 +1337,25 @@ TESTS = [
     test_state_legacy_field_tolerated,
     test_constants_match_specs,
     test_summary_includes_vendor,
+    # Anthropic chat content
+    test_anthropic_chats_requires_compliance_access_key,
+    test_anthropic_chats_emits_one_event_per_message,
+    test_anthropic_chats_uses_updated_at_filter,
+    test_anthropic_chats_404_message,
+    test_anthropic_chats_403_warns_about_admin_key,
+    test_anthropic_chats_skips_individual_failed_chat,
+    # OpenAI conversations
+    test_openai_conversations_admin_key_required,
+    test_openai_conversations_handles_per_message_response,
+    test_openai_conversations_handles_per_conversation_response,
+    test_openai_conversations_synthesizes_id_when_missing,
+    test_openai_conversations_request_uses_bracket_filter,
+    test_openai_conversations_404_message_points_at_palo_native,
+    # Cross-feed Pub/Sub + HTTP envelope
+    test_pubsub_emits_vendor_attribute_for_all_four,
+    test_pubsub_anthropic_chats_attributes,
+    test_pubsub_openai_conversations_attributes,
+    test_http_envelope_for_chats_and_conversations,
     # Parallel execution
     test_parallel_execution_no_contention,
     test_parallel_repeated_runs_dedupe_correctly,

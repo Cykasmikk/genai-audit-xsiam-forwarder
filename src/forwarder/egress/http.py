@@ -70,22 +70,37 @@ class HttpEgress:
         return sent
 
     def _enrich(self, ev: dict) -> dict:
-        # Vendors emit different time-field names, so derive _time per vendor.
-        if self._cfg.vendor == "anthropic":
+        # Vendors emit different time-field names; the adapters that produce
+        # wrapped payloads (anthropic_chats / openai_conversations) put the
+        # canonical timestamp inside .message.created_at or .message.effective_at.
+        v = self._cfg.vendor
+        if v == "anthropic":
             t = ev.get("created_at")
             ev_type = ev.get("type")
-        elif self._cfg.vendor == "openai":
+        elif v == "anthropic_chats":
+            msg = ev.get("message") or {}
+            t = msg.get("created_at")
+            ev_type = "claude_chat_message"
+        elif v == "openai":
             ts = ev.get("effective_at")
-            t = (
-                _unix_to_iso(int(ts)) if isinstance(ts, (int, float)) else None
-            )
+            t = _unix_to_iso(int(ts)) if isinstance(ts, (int, float)) else None
             ev_type = ev.get("type")
+        elif v == "openai_conversations":
+            msg = ev.get("message") if "message" in ev else ev
+            ts = msg.get("effective_at") or msg.get("created_at")
+            if isinstance(ts, (int, float)):
+                t = _unix_to_iso(int(ts))
+            elif isinstance(ts, str):
+                t = ts
+            else:
+                t = None
+            ev_type = "openai_conversation_message"
         else:
             t = ev.get("created_at") or ev.get("effective_at")
             ev_type = ev.get("type")
         return {
-            "_vendor": self._cfg.vendor,
-            "_product": f"{self._cfg.vendor}_{self._cfg.product}",
+            "_vendor": v,
+            "_product": f"{v}_{self._cfg.product}",
             "_time": t,
             "_event": ev_type,
             "event": ev,

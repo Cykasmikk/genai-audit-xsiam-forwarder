@@ -12,8 +12,10 @@ from .core import run
 from .egress.pubsub import PubSubEgress
 from .state_gcp import FirestoreStateStore
 from .vendors import AuditClient
+from .vendors.anthropic_chat_content import AnthropicChatContentClient
 from .vendors.anthropic_compliance import AnthropicComplianceClient
 from .vendors.openai_audit import OpenAIAuditClient
+from .vendors.openai_conversations import OpenAIConversationsClient
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -30,10 +32,15 @@ def _make_client(vendor: str, api_key_secret: str) -> AuditClient:
     api_key = _secret(api_key_secret)
     if vendor == "anthropic":
         return AnthropicComplianceClient(api_key)
+    if vendor == "anthropic_chats":
+        return AnthropicChatContentClient(api_key)
     if vendor == "openai":
         return OpenAIAuditClient(api_key)
+    if vendor == "openai_conversations":
+        return OpenAIConversationsClient(api_key)
     raise ValueError(
-        f"Unsupported VENDOR={vendor!r}. Supported: 'anthropic', 'openai'."
+        f"Unsupported VENDOR={vendor!r}. Supported: "
+        "'anthropic', 'anthropic_chats', 'openai', 'openai_conversations'."
     )
 
 

@@ -70,8 +70,12 @@ class PubSubEgress:
         attrs: dict = {"vendor": self._vendor}
         if self._vendor == "anthropic":
             self._anthropic_attrs(ev, attrs)
+        elif self._vendor == "anthropic_chats":
+            self._anthropic_chats_attrs(ev, attrs)
         elif self._vendor == "openai":
             self._openai_attrs(ev, attrs)
+        elif self._vendor == "openai_conversations":
+            self._openai_conversations_attrs(ev, attrs)
         return attrs
 
     @staticmethod
@@ -89,6 +93,24 @@ class PubSubEgress:
             attrs["actor_user_id"] = actor["user_id"][:256]
         elif isinstance(actor.get("api_key_id"), str):
             attrs["actor_api_key_id"] = actor["api_key_id"][:256]
+
+    @staticmethod
+    def _anthropic_chats_attrs(ev: dict, attrs: dict) -> None:
+        # Wrapped payload from anthropic_chat_content adapter:
+        #   {"chat": {chat metadata}, "message": {message body}}
+        chat = ev.get("chat") or {}
+        message = ev.get("message") or {}
+        if isinstance(chat.get("id"), str):
+            attrs["chat_id"] = chat["id"][:128]
+        if isinstance(chat.get("organization_id"), str):
+            attrs["organization_id"] = chat["organization_id"][:64]
+        if isinstance(chat.get("project_id"), str):
+            attrs["project_id"] = chat["project_id"][:128]
+        user = chat.get("user") or {}
+        if isinstance(user.get("id"), str):
+            attrs["actor_user_id"] = user["id"][:256]
+        if isinstance(message.get("role"), str):
+            attrs["message_role"] = message["role"][:32]
 
     @staticmethod
     def _openai_attrs(ev: dict, attrs: dict) -> None:
@@ -111,3 +133,24 @@ class PubSubEgress:
             ak = actor["api_key"]
             if isinstance(ak.get("id"), str):
                 attrs["actor_api_key_id"] = ak["id"][:256]
+
+    @staticmethod
+    def _openai_conversations_attrs(ev: dict, attrs: dict) -> None:
+        # Wrapped payload from openai_conversations adapter:
+        #   {"conversation": {convo meta}, "message": {message body}}
+        # OR the message-level shape directly if the spec returns flat records.
+        convo = ev.get("conversation") or {}
+        message = ev.get("message") if "message" in ev else ev
+        if isinstance(convo.get("id"), str):
+            attrs["conversation_id"] = convo["id"][:128]
+        if isinstance(convo.get("workspace_id"), str):
+            attrs["workspace_id"] = convo["workspace_id"][:64]
+        if isinstance(message.get("role"), str):
+            attrs["message_role"] = message["role"][:32]
+        if isinstance(message.get("model"), str):
+            attrs["model"] = message["model"][:64]
+        # Fallback: actor_user_id at the message level
+        if isinstance(message.get("user_id"), str):
+            attrs["actor_user_id"] = message["user_id"][:256]
+        elif isinstance(convo.get("user_id"), str):
+            attrs["actor_user_id"] = convo["user_id"][:256]

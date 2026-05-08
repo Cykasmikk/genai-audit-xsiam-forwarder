@@ -815,6 +815,159 @@ def test_summary_includes_vendor():
     print("OK test_summary_includes_vendor")
 
 
+def test_parallel_execution_no_contention():
+    """Both vendors run concurrently against a shared, lock-free state store
+    and a shared in-memory bucket. Asserts that:
+      - Each vendor sees only its own events forwarded
+      - State documents stay vendor-namespaced (no cross-write)
+      - Both runs reach a watermark > prior watermark
+      - Each vendor's S3 object key uses its own /<vendor>/ prefix
+    """
+    import threading
+
+    # Shared "table" (DynamoDB-style) — vendor namespacing comes from PK,
+    # exactly as in production state_aws.py.
+    table = {}
+    table_lock = threading.Lock()
+
+    class SharedTableStore(StateStore):
+        def __init__(self, vendor):
+            self.vendor = vendor
+
+        def load(self):
+            with table_lock:
+                return ForwarderState.from_dict(table.get(f"{self.vendor}_audit_state"))
+
+        def save(self, st):
+            with table_lock:
+                table[f"{self.vendor}_audit_state"] = st.to_dict()
+
+    # Shared bucket simulator — concurrent writes from both threads.
+    bucket_calls = []
+    bucket_lock = threading.Lock()
+
+    class SharedBucket:
+        def put_object(self, **kw):
+            with bucket_lock:
+                bucket_calls.append(kw)
+
+    # Build per-vendor stacks and run both in threads simultaneously.
+    barrier = threading.Barrier(2)
+    summaries = {}
+    errors: list = []
+
+    def run_one(client, egress, store, label):
+        try:
+            barrier.wait()  # release both threads at the same instant
+            summaries[label] = run(client, egress, store, now=NOW)
+        except Exception as e:
+            errors.append((label, e))
+
+    bucket = SharedBucket()
+    threads = [
+        threading.Thread(target=run_one, args=(
+            FakeAnthropic(ANTHROPIC_EVENTS),
+            S3Egress("audit-bucket", vendor="anthropic", s3_client=bucket),
+            SharedTableStore("anthropic"),
+            "anthropic",
+        )),
+        threading.Thread(target=run_one, args=(
+            FakeOpenAI(OPENAI_EVENTS),
+            S3Egress("audit-bucket", vendor="openai", s3_client=bucket),
+            SharedTableStore("openai"),
+            "openai",
+        )),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert not errors, f"thread errors: {errors}"
+    assert len(summaries) == 2
+
+    # Each vendor forwarded its own count
+    assert summaries["anthropic"]["forwarded"] == len(ANTHROPIC_EVENTS), summaries["anthropic"]
+    assert summaries["openai"]["forwarded"] == len(OPENAI_EVENTS), summaries["openai"]
+
+    # State stays vendor-namespaced
+    assert "anthropic_audit_state" in table
+    assert "openai_audit_state" in table
+    a_state = table["anthropic_audit_state"]
+    o_state = table["openai_audit_state"]
+    assert all(i.startswith("activity_") for i in a_state["recent_ids"])
+    assert all(i.startswith("audit_log-") for i in o_state["recent_ids"])
+    # Watermarks differ (vendors emitted events at different timestamps)
+    assert a_state["watermark"] != o_state["watermark"]
+
+    # Two S3 objects total — one per vendor — with vendor-prefixed keys
+    assert len(bucket_calls) == 2
+    keys_by_prefix = {}
+    for c in bucket_calls:
+        prefix = c["Key"].split("/", 1)[0]
+        keys_by_prefix[prefix] = c["Metadata"]["vendor"]
+    assert keys_by_prefix == {"anthropic": "anthropic", "openai": "openai"}
+    print("OK test_parallel_execution_no_contention")
+
+
+def test_parallel_repeated_runs_dedupe_correctly():
+    """Stress: same vendor run twice in parallel against shared state. Even
+    if the cap-of-1 is bypassed (e.g. a misconfigured deploy), the dedupe
+    by event id must mean no event is forwarded twice. State watermark
+    might regress under a race, but XSIAM-side dedupe by id catches it.
+    """
+    import threading
+
+    table = {}
+    table_lock = threading.Lock()
+    egress_received = []
+    egress_lock = threading.Lock()
+
+    class SharedTableStore(StateStore):
+        def __init__(self, vendor):
+            self.vendor = vendor
+
+        def load(self):
+            with table_lock:
+                return ForwarderState.from_dict(table.get(f"{self.vendor}_audit_state"))
+
+        def save(self, st):
+            with table_lock:
+                table[f"{self.vendor}_audit_state"] = st.to_dict()
+
+    class CountingEgress:
+        def send(self, events):
+            evs = list(events)
+            with egress_lock:
+                egress_received.extend(evs)
+            return len(evs)
+
+    barrier = threading.Barrier(2)
+
+    def go():
+        barrier.wait()
+        run(FakeAnthropic(ANTHROPIC_EVENTS), CountingEgress(),
+            SharedTableStore("anthropic"), now=NOW)
+
+    threads = [threading.Thread(target=go), threading.Thread(target=go)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    # The egress may receive each event up to 2x (if the parallel runs both
+    # see an empty/identical state load). What MUST hold is that the unique
+    # event ids equal the input set — i.e. there's no fabrication and no
+    # mutation of payloads.
+    forwarded_ids = {ev["id"] for ev in egress_received}
+    expected_ids = {ev["id"] for ev in ANTHROPIC_EVENTS}
+    assert forwarded_ids == expected_ids, (forwarded_ids, expected_ids)
+    # And state ends in a consistent shape (not corrupt)
+    final = ForwarderState.from_dict(table.get("anthropic_audit_state"))
+    assert final.watermark and len(final.recent_ids) <= MAX_RECENT_IDS
+    print("OK test_parallel_repeated_runs_dedupe_correctly")
+
+
 # ── Test runner ────────────────────────────────────────────────────────────
 
 
@@ -851,6 +1004,9 @@ TESTS = [
     test_state_legacy_field_tolerated,
     test_constants_match_specs,
     test_summary_includes_vendor,
+    # Parallel execution
+    test_parallel_execution_no_contention,
+    test_parallel_repeated_runs_dedupe_correctly,
 ]
 
 

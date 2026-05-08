@@ -34,7 +34,7 @@ jobs:
               except SyntaxError as e: ok = False; print(f'FAIL {p}: {e}')
           sys.exit(0 if ok else 1)
           "
-      - name: Smoke test (dedupe + S3 + Pub/Sub egress)
+      - name: Smoke test (31 cases: per-vendor + cross-vendor + parallel)
         env:
           PYTHONPATH: src
         run: python tests/smoke.py

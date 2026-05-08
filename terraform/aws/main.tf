@@ -286,6 +286,15 @@ resource "aws_lambda_function" "forwarder" {
   timeout          = 300
   memory_size      = 512
 
+  # Cap to 1 concurrent invocation per vendor so a slow tick (e.g. a paginated
+  # backfill across thousands of events) cannot race with the next scheduled
+  # tick on the shared state row. Different vendors get independent caps, so
+  # they continue to run truly in parallel — only same-vendor overlap is
+  # serialized. EventBridge retries throttled invocations for up to 24 h, so
+  # no audit data is dropped on overlap; the next tick simply runs after the
+  # in-flight one finishes.
+  reserved_concurrent_executions = 1
+
   environment {
     variables = {
       VENDOR                   = each.key

@@ -192,6 +192,15 @@ resource "google_cloudfunctions2_function" "forwarder" {
     available_memory      = "512M"
     timeout_seconds       = 540
     service_account_email = google_service_account.fn[each.key].email
+
+    # Cap to 1 active instance per vendor so a slow tick cannot race with the
+    # next scheduled tick on the shared Firestore doc. Different vendors get
+    # independent caps, so they continue to run truly in parallel — only
+    # same-vendor overlap is serialized (Cloud Scheduler retries the Pub/Sub
+    # delivery so no tick is lost when an instance is busy).
+    max_instance_count               = 1
+    max_instance_request_concurrency = 1
+
     environment_variables = {
       VENDOR                   = each.key
       GCP_PROJECT              = var.project_id

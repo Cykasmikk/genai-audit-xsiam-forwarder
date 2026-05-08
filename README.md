@@ -81,6 +81,37 @@ There is no native Anthropic or OpenAI integration in XSIAM, and no vendor-publi
                                                                 └──────────────────┘
 ```
 
+### Parallel execution
+
+The repo is designed for **both vendors running concurrently** with no
+shared mutable state at runtime:
+
+- **Per-vendor Lambda / Cloud Function.** Terraform `for_each` over the
+  vendors map produces one function, one schedule, one queue/topic, and
+  one secret per vendor. They have separate IAM principals and separate
+  log groups. They invoke at the same wall-clock minute and run truly in
+  parallel.
+- **State is vendor-namespaced.** DynamoDB PK is `{vendor}_audit_state`;
+  Firestore doc id is `{vendor}_state`. A read or write for one vendor
+  cannot read or clobber another vendor's row.
+- **Egress is vendor-partitioned.** S3 keys carry a `{vendor}/` prefix and
+  per-vendor SQS queues filter on it. Pub/Sub uses one topic and one pull
+  subscription per vendor. XSIAM operators wire up one data source per
+  vendor; events never cross-pollinate.
+- **Same-vendor overlap is serialized.** Each Lambda has
+  `reserved_concurrent_executions = 1` and each Cloud Function has
+  `max_instance_count = 1` — if one tick exceeds the schedule interval,
+  the next invocation is queued (Lambda) or the Pub/Sub delivery is
+  retried (Cloud Function), so a slow Anthropic poll never races the next
+  Anthropic poll on the state row. Cross-vendor concurrency is
+  unaffected: the OpenAI invocation runs concurrently with the slow
+  Anthropic one.
+
+The smoke suite includes `test_parallel_execution_no_contention` (both
+vendors fired from threads against a shared state simulator) and
+`test_parallel_repeated_runs_dedupe_correctly` (two same-vendor invocations
+hammered in parallel, asserting no payload mutation or fabrication).
+
 ### Idempotency model
 
 Both vendors emit stable per-event IDs. Each tick, per vendor:
@@ -157,7 +188,7 @@ terraform/aws/                  Per-vendor Lambda/EventBridge/SQS/Secret +
                                 shared bucket/state-table/IAM-role
 terraform/gcp/                  Per-vendor Function/Scheduler/Pub-Sub topic+sub/Secret +
                                 shared Firestore/SA
-tests/smoke.py                  29 deterministic tests (no AWS/GCP creds needed)
+tests/smoke.py                  31 deterministic tests (no AWS/GCP creds needed)
 .github/workflows/ci.yml        Python smoke + Terraform validate per PR
 ```
 

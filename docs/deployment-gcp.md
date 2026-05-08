@@ -174,11 +174,14 @@ Cowork subscription too.
 
 | Error | Cause | Fix |
 |---|---|---|
-| `Error 403: Permission denied` during `terraform apply` | Service account missing Owner / required roles | Grant Owner or scoped equivalent on the project |
+| `oauth2: "invalid_grant" "reauth related error (invalid_rapt)"` mid-apply | Workspace policy requires fresh reauth proof token; long Terraform applies hit it | Run `gcloud auth login <account> --update-adc --force` to get a fresh token, then re-run `terraform apply` (idempotent) |
+| `Build failed: missing permission on the build service account` | Workspace org policy stripped Cloud Build SA defaults | The Terraform now explicitly grants `roles/cloudbuild.builds.builder` and `roles/logging.logWriter` to the compute SA — re-apply if you see this on an old version |
+| Cloud Function 401 on first trigger: `IAM principal lacks {run.routes.invoke} permission` | Eventarc trigger principal lacks `run.invoker` on the Cloud Run service backing the function | The Terraform now sets the trigger SA to the per-vendor function SA and grants `roles/run.invoker` on the Cloud Run service to it. Re-apply if drift |
+| `Error 403: Permission denied` during `terraform apply` | User account missing Owner / required roles on the project | Grant Owner or scoped equivalent |
 | `Error: googleapi: Error 409: ALREADY_EXISTS` for Firestore database | Project already has Datastore-mode database | Use a fresh project or migrate (Firestore can't switch modes) |
 | Cloud Function deploy fails with `requirements.txt not found` | Source archive excludes `requirements.txt` | Check `terraform/gcp/main.tf`'s `archive_file.fn_src.excludes` — `requirements.txt` should NOT be in the excludes list |
-| Cloud Function 403 on first invoke | Function SA missing `roles/datastore.user` | Already wired by the Terraform; reapply if drift |
-| `OpenAIAuditAPIError ... HTTP 403` | Audit logging not enabled in OpenAI org | Enable in OpenAI org settings → Data controls |
-| XSIAM dataset empty | Subscription has no published messages, OR XSIAM SA can't pull | Verify with `gcloud pubsub subscriptions pull <name>` — if you can pull, the SA can too |
+| `OpenAIAuditAPIError ... HTTP 403` at runtime | Audit logging not enabled in OpenAI org | Enable in *Org settings → Data controls → Data retention → Audit logging* |
+| `AnthropicComplianceAPIError ... HTTP 404` at runtime | Org doesn't have Compliance API enabled | Anthropic returns 404 (not 403) for orgs without Compliance API enablement. Enable per [vendors/anthropic.md](vendors/anthropic.md#enablement). |
+| XSIAM dataset empty | Subscription has no published messages, OR XSIAM SA can't pull | Verify locally with `gcloud pubsub subscriptions pull <name>` — if you can pull, the SA can too |
 
 For runbook-level operations see [docs/operations.md](operations.md).

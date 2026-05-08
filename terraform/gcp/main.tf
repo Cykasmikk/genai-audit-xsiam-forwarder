@@ -1,4 +1,9 @@
 locals {
+  # GCP service account account_id is capped at 30 chars and disallows
+  # underscores; Cloud Functions Gen 2 names disallow underscores too.
+  # Map each vendor key to a hyphenated form for resources that need it.
+  vendor_dashed = { for k, _ in var.vendors : k => replace(k, "_", "-") }
+
   required_apis = [
     "cloudfunctions.googleapis.com",
     "cloudbuild.googleapis.com",
@@ -17,6 +22,29 @@ resource "google_project_service" "apis" {
   for_each           = toset(local.required_apis)
   service            = each.value
   disable_on_destroy = false
+}
+
+# Project number — needed for the Google-managed service-agent identities below.
+data "google_project" "this" {
+  project_id = var.project_id
+}
+
+# ─── Cloud Build / Cloud Functions Gen 2 build prerequisites ──────────────
+# Workspace org policies often strip the default grants Cloud Build expects,
+# producing "Build failed: missing permission on the build service account"
+# at function-deploy time. Grant explicitly so a fresh project deploys clean.
+resource "google_project_iam_member" "compute_sa_cloudbuild_builder" {
+  project    = var.project_id
+  role       = "roles/cloudbuild.builds.builder"
+  member     = "serviceAccount:${data.google_project.this.number}-compute@developer.gserviceaccount.com"
+  depends_on = [google_project_service.apis]
+}
+
+resource "google_project_iam_member" "compute_sa_log_writer" {
+  project    = var.project_id
+  role       = "roles/logging.logWriter"
+  member     = "serviceAccount:${data.google_project.this.number}-compute@developer.gserviceaccount.com"
+  depends_on = [google_project_service.apis]
 }
 
 # ─── Shared: Firestore (state, namespaced by vendor in doc id) ────────────
@@ -56,8 +84,10 @@ resource "google_storage_bucket_object" "src" {
 }
 
 # ─── Shared: dedicated SA that XSIAM authenticates as ─────────────────────
+# Fixed short name: GCP SA account_id ≤ 30 chars, no underscores. var.name_prefix
+# is 27 chars at default which leaves no room — use a fixed short id instead.
 resource "google_service_account" "xsiam" {
-  account_id   = "${var.name_prefix}-xsiam"
+  account_id   = "xsiam-ingest"
   display_name = "Cortex XSIAM ingest"
   description  = "Authenticates the Cortex XSIAM tenant pulling GenAI vendor audit events."
 }
@@ -80,10 +110,11 @@ resource "google_secret_manager_secret_version" "api_key" {
   secret_data = var.api_keys[each.key]
 }
 
-# Per-vendor function service account
+# Per-vendor function service account.
+# Short SA id: `fn-{vendor-with-hyphens}`. Max len: 3 + 20 (openai-conversations) = 23.
 resource "google_service_account" "fn" {
   for_each     = var.vendors
-  account_id   = "${var.name_prefix}-${each.key}-fn"
+  account_id   = "fn-${local.vendor_dashed[each.key]}"
   display_name = "${each.key} → Pub/Sub forwarder"
 }
 
@@ -171,10 +202,11 @@ resource "google_cloud_scheduler_job" "tick" {
   depends_on = [google_project_service.apis]
 }
 
-# Per-vendor Cloud Function
+# Per-vendor Cloud Function. Cloud Functions Gen 2 names disallow underscores
+# (they back onto Cloud Run service names with the same constraint).
 resource "google_cloudfunctions2_function" "forwarder" {
   for_each = var.vendors
-  name     = "${var.name_prefix}-${each.key}"
+  name     = "${var.name_prefix}-${local.vendor_dashed[each.key]}"
   location = var.region
 
   build_config {
@@ -214,8 +246,36 @@ resource "google_cloudfunctions2_function" "forwarder" {
     trigger_region = var.region
     event_type     = "google.cloud.pubsub.topic.v1.messagePublished"
     pubsub_topic   = google_pubsub_topic.tick[each.key].id
-    retry_policy   = "RETRY_POLICY_DO_NOT_RETRY"
+    # Use the per-vendor function SA as the trigger principal so we can grant
+    # run.invoker to a known SA instead of the default compute SA.
+    service_account_email = google_service_account.fn[each.key].email
+    retry_policy          = "RETRY_POLICY_DO_NOT_RETRY"
   }
 
-  depends_on = [google_project_service.apis, google_firestore_database.state]
+  depends_on = [
+    google_project_service.apis,
+    google_firestore_database.state,
+    google_project_iam_member.compute_sa_cloudbuild_builder,
+    google_project_iam_member.compute_sa_log_writer,
+  ]
+}
+
+# Eventarc-triggered Cloud Functions (Gen 2) need the trigger principal to be
+# able to invoke the underlying Cloud Run service.
+resource "google_cloud_run_v2_service_iam_member" "fn_invoker" {
+  for_each = var.vendors
+  project  = var.project_id
+  location = var.region
+  name     = google_cloudfunctions2_function.forwarder[each.key].name
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${google_service_account.fn[each.key].email}"
+}
+
+# Pub/Sub push subscriptions backed by an OIDC token need the Pub/Sub service
+# agent to act as a token-creator on the SA whose identity is being used.
+resource "google_service_account_iam_member" "pubsub_token_creator" {
+  for_each           = var.vendors
+  service_account_id = google_service_account.fn[each.key].name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "serviceAccount:service-${data.google_project.this.number}@gcp-sa-pubsub.iam.gserviceaccount.com"
 }

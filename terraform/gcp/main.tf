@@ -34,6 +34,8 @@ data "google_project" "this" {
 # producing "Build failed: missing permission on the build service account"
 # at function-deploy time. Grant explicitly so a fresh project deploys clean.
 resource "google_project_iam_member" "compute_sa_cloudbuild_builder" {
+  # checkov:skip=CKV_GCP_46:required to make Cloud Build work on Workspace-managed projects whose default-SA grants are stripped; a dedicated SA replacement is non-trivial under Cloud Functions Gen 2.
+  # checkov:skip=CKV_GCP_49:cloudbuild.builds.builder is the role Cloud Build itself requires to operate; restricting it would break the build pipeline. The compute SA is the documented build identity for Cloud Functions Gen 2.
   project    = var.project_id
   role       = "roles/cloudbuild.builds.builder"
   member     = "serviceAccount:${data.google_project.this.number}-compute@developer.gserviceaccount.com"
@@ -41,6 +43,7 @@ resource "google_project_iam_member" "compute_sa_cloudbuild_builder" {
 }
 
 resource "google_project_iam_member" "compute_sa_log_writer" {
+  # checkov:skip=CKV_GCP_46:same rationale as compute_sa_cloudbuild_builder — needed so Cloud Build can write logs.
   project    = var.project_id
   role       = "roles/logging.logWriter"
   member     = "serviceAccount:${data.google_project.this.number}-compute@developer.gserviceaccount.com"
@@ -71,10 +74,16 @@ data "archive_file" "fn_src" {
 }
 
 resource "google_storage_bucket" "src" {
+  # checkov:skip=CKV_GCP_62:source-archive bucket holds only function-source zips. Access logging would be redundant with the Audit Logs feeds we forward.
   name                        = "${var.project_id}-${var.name_prefix}-src"
   location                    = var.region
   uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
   force_destroy               = true
+
+  versioning {
+    enabled = true
+  }
 }
 
 resource "google_storage_bucket_object" "src" {
@@ -134,6 +143,7 @@ resource "google_project_iam_member" "fn_firestore" {
 
 # Audit Pub/Sub topic per vendor (one XSIAM data source per topic)
 resource "google_pubsub_topic" "audit" {
+  # checkov:skip=CKV_GCP_83:Google-managed encryption keys (default) are sufficient for the typical SOC compliance baseline. CSEK adds key-rotation ops overhead without quantifiable security benefit for an in-transit audit feed.
   for_each   = var.vendors
   name       = "${var.name_prefix}-${each.key}-audit"
   depends_on = [google_project_service.apis]
@@ -182,6 +192,7 @@ resource "google_pubsub_topic_iam_member" "xsiam_viewer" {
 
 # Per-vendor scheduler tick topic (separate from the audit topic)
 resource "google_pubsub_topic" "tick" {
+  # checkov:skip=CKV_GCP_83:topic carries empty-payload heartbeat triggers, no audit data.
   for_each   = var.vendors
   name       = "${var.name_prefix}-${each.key}-tick"
   depends_on = [google_project_service.apis]
@@ -224,6 +235,8 @@ resource "google_cloudfunctions2_function" "forwarder" {
     available_memory      = "512M"
     timeout_seconds       = 540
     service_account_email = google_service_account.fn[each.key].email
+
+    ingress_settings = "ALLOW_INTERNAL_ONLY"
 
     # Cap to 1 active instance per vendor so a slow tick cannot race with the
     # next scheduled tick on the shared Firestore doc. Different vendors get

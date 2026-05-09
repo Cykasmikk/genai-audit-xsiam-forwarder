@@ -19,40 +19,78 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: src/requirements.txt
-      - name: Install runtime deps
+      - name: Install runtime + tooling
         run: |
           python -m pip install --upgrade pip
           pip install -r src/requirements.txt
-          pip install boto3
-      - name: Syntax check
-        run: |
-          python -c "
-          import ast, pathlib, sys
-          ok = True
-          for p in pathlib.Path('src').rglob('*.py'):
-              try: ast.parse(p.read_text())
-              except SyntaxError as e: ok = False; print(f'FAIL {p}: {e}')
-          sys.exit(0 if ok else 1)
-          "
-      - name: "Smoke test (47 cases: per-vendor + cross-vendor + parallel)"
+          pip install boto3 ruff bandit pip-audit coverage
+
+      - name: ruff lint
+        run: ruff check src tests
+
+      - name: ruff format check
+        run: ruff format --check src tests
+
+      - name: bandit (Python SAST)
+        run: bandit -q -r src
+
+      - name: pip-audit (deps CVE scan)
+        run: pip-audit -r src/requirements.txt
+
+      - name: "Smoke test (47 cases) with coverage"
         env:
           PYTHONPATH: src
-        run: python tests/smoke.py
+        run: |
+          coverage run --source=src/forwarder tests/smoke.py
+          coverage report --fail-under=75
 
   terraform:
     name: terraform
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        stack: [aws, gcp]
+        stack:
+          - terraform/aws
+          - terraform/gcp
+          - cowork-otel/terraform/aws
+          - cowork-otel/terraform/gcp
     steps:
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.9.8"
       - name: fmt check
-        run: terraform -chdir=terraform/${{ matrix.stack }} fmt -check
+        run: terraform -chdir=${{ matrix.stack }} fmt -check
       - name: init (no backend)
-        run: terraform -chdir=terraform/${{ matrix.stack }} init -backend=false -input=false
+        run: terraform -chdir=${{ matrix.stack }} init -backend=false -input=false
       - name: validate
-        run: terraform -chdir=terraform/${{ matrix.stack }} validate
+        run: terraform -chdir=${{ matrix.stack }} validate
+
+  checkov:
+    name: checkov
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        stack:
+          - terraform/aws
+          - terraform/gcp
+          - cowork-otel/terraform/aws
+          - cowork-otel/terraform/gcp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: ${{ matrix.stack }}
+          quiet: true
+          soft_fail: false
+
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -26,9 +26,7 @@ class DynamoStateStore:
             return ForwarderState()
         return ForwarderState(
             watermark=item.get("watermark"),
-            recent_ids=list(
-                item.get("recent_ids") or item.get("recent_hashes") or []
-            ),
+            recent_ids=list(item.get("recent_ids") or item.get("recent_hashes") or []),
         )
 
     def save(self, state: ForwarderState) -> None:

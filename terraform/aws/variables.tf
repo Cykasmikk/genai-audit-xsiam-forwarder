@@ -66,9 +66,9 @@ variable "xsiam_aws_account_id" {
 }
 
 variable "log_retention_days" {
-  description = "CloudWatch log retention for each Lambda."
+  description = "CloudWatch log retention for each Lambda. Default 365 to align with typical SOC-2 / ISO retention requirements."
   type        = number
-  default     = 90
+  default     = 365
 }
 
 variable "bucket_object_retention_days" {

@@ -44,7 +44,9 @@ class HttpEgressConfig:
 
 
 class HttpEgress:
-    def __init__(self, config: HttpEgressConfig, http: urllib3.PoolManager | None = None):
+    def __init__(
+        self, config: HttpEgressConfig, http: urllib3.PoolManager | None = None
+    ):
         self._cfg = config
         self._http = http or urllib3.PoolManager(retries=False, timeout=30.0)
 

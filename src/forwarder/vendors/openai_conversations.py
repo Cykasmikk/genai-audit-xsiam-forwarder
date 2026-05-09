@@ -258,9 +258,7 @@ def _to_event(record: dict, parent: dict) -> AuditEvent:
         # Last-resort fallback so we don't crash on missing timestamp.
         created_at = _unix_to_iso(int(datetime.now(timezone.utc).timestamp()))
 
-    payload = (
-        {"conversation": parent, "message": record} if parent else record
-    )
+    payload = {"conversation": parent, "message": record} if parent else record
     return AuditEvent(id=rec_id, created_at=created_at, vendor=VENDOR, raw=payload)
 
 

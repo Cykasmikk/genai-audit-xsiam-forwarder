@@ -158,16 +158,10 @@ class AnthropicChatContentClient:
                 full = self._get_chat_messages(chat_id)
             except AnthropicChatContentAPIError as e:
                 # Don't let a single bad chat abort the whole run.
-                log.warning(
-                    "anthropic_chats: skipping chat %s due to %s", chat_id, e
-                )
+                log.warning("anthropic_chats: skipping chat %s due to %s", chat_id, e)
                 continue
 
-            chat_meta = {
-                k: v
-                for k, v in full.items()
-                if k != "chat_messages"
-            }
+            chat_meta = {k: v for k, v in full.items() if k != "chat_messages"}
 
             for msg in full.get("chat_messages") or []:
                 if self._fetch_file_content:
@@ -183,9 +177,7 @@ class AnthropicChatContentClient:
                     raw=payload,
                 )
 
-    def _iter_chats(
-        self, starting_at: datetime, ending_at: datetime
-    ) -> Iterator[dict]:
+    def _iter_chats(self, starting_at: datetime, ending_at: datetime) -> Iterator[dict]:
         base_params = {
             PARAM_LIMIT: CHATS_LIST_PAGE_LIMIT,
             PARAM_UPDATED_AT_GTE: _iso_z(starting_at),

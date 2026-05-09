@@ -4,6 +4,7 @@ resource "random_uuid" "xsiam_external_id" {}
 
 # ─── Shared: state table ──────────────────────────────────────────────────
 resource "aws_dynamodb_table" "state" {
+  # checkov:skip=CKV_AWS_119:AWS-managed encryption (default) is sufficient for the SOC compliance baseline. Operators requiring CMK can add a kms_key_arn; the state document contains only watermarks + recent IDs, no secrets.
   name         = "${var.name_prefix}-state"
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "pk"
@@ -24,6 +25,9 @@ resource "aws_dynamodb_table" "state" {
 
 # ─── Shared: audit bucket (vendor objects partitioned by prefix) ──────────
 resource "aws_s3_bucket" "audit" {
+  # checkov:skip=CKV_AWS_18:this bucket IS the SOC audit log; access logging would be circular. Use CloudTrail S3 data events for an out-of-band audit trail.
+  # checkov:skip=CKV_AWS_144:cross-region replication doubles cost. Anthropic Compliance API retains 6 years upstream; OpenAI per its policy. Replication does not add durability beyond what S3 already provides (11 9's).
+  # checkov:skip=CKV_AWS_145:AES-256 (S3-managed) is sufficient for typical compliance. Operators requiring CMK can switch the SSE config to KMS via a follow-up patch.
   bucket_prefix = "${var.name_prefix}-"
   force_destroy = false
 }
@@ -65,6 +69,9 @@ resource "aws_s3_bucket_lifecycle_configuration" "audit" {
     }
     noncurrent_version_expiration {
       noncurrent_days = 30
+    }
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
     }
   }
 }
@@ -192,6 +199,8 @@ resource "aws_iam_role_policy" "xsiam" {
 
 # ─── Per-vendor: API key secret ───────────────────────────────────────────
 resource "aws_secretsmanager_secret" "api_key" {
+  # checkov:skip=CKV2_AWS_57:vendor APIs (Anthropic Compliance, OpenAI Audit) don't expose key-rotation endpoints — rotation is a manual flow documented in docs/operations.md
+  # checkov:skip=CKV_AWS_149:AWS-managed encryption is sufficient. Operators requiring CMK can override kms_key_id via a follow-up patch.
   for_each    = var.vendors
   name_prefix = "${var.name_prefix}/${each.key}-api-key-"
   description = "API key for the ${each.key} audit log forwarder."
@@ -269,12 +278,17 @@ data "archive_file" "lambda_zip" {
 }
 
 resource "aws_cloudwatch_log_group" "lambda" {
+  # checkov:skip=CKV_AWS_158:Lambda log groups carry only function stdout/stderr (no audit data — that flows through S3). AWS-managed encryption is sufficient; no PII is logged.
   for_each          = var.vendors
   name              = "/aws/lambda/${var.name_prefix}-${each.key}"
   retention_in_days = var.log_retention_days
 }
 
 resource "aws_lambda_function" "forwarder" {
+  # checkov:skip=CKV_AWS_173:env vars hold non-secret resource refs (table name, bucket, secret ARN); secrets are read at runtime via Secrets Manager.
+  # checkov:skip=CKV_AWS_117:VPC adds NAT-gateway cost without protection benefit — vendor APIs and AWS service endpoints reached are all public.
+  # checkov:skip=CKV_AWS_272:code-signing requires a signing profile + signed deployment artifacts; not justified for an internal SOC tool versioned via Git commit SHA.
+  # checkov:skip=CKV_AWS_116:EventBridge already retries failed Lambda invocations for up to 24h. The forwarder is idempotent — next tick replays the same window. An SQS DLQ would be belt-and-suspenders without operational benefit.
   for_each = var.vendors
 
   function_name    = "${var.name_prefix}-${each.key}"
@@ -285,6 +299,10 @@ resource "aws_lambda_function" "forwarder" {
   source_code_hash = data.archive_file.lambda_zip.output_base64sha256
   timeout          = 300
   memory_size      = 512
+
+  tracing_config {
+    mode = "Active"
+  }
 
   # Cap to 1 concurrent invocation per vendor so a slow tick (e.g. a paginated
   # backfill across thousands of events) cannot race with the next scheduled

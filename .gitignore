@@ -31,3 +31,6 @@ Thumbs.db
 
 # Tooling
 .claude/
+
+# Coverage artifact (regenerated each run)
+.coverage

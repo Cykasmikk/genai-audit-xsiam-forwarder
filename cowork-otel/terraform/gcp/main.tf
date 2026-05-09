@@ -34,6 +34,7 @@ resource "google_secret_manager_secret_version" "bearer_token" {
 
 # ─── Pub/Sub topic + XSIAM-bound subscription ─────────────────────────────
 resource "google_pubsub_topic" "cowork" {
+  # checkov:skip=CKV_GCP_83:Google-managed encryption is sufficient for the SOC compliance baseline. CSEK adds key-rotation ops overhead without quantifiable benefit for an in-transit audit feed.
   name       = var.name_prefix
   depends_on = [google_project_service.apis]
 }
@@ -119,6 +120,7 @@ resource "google_secret_manager_secret_iam_member" "collector_config_access" {
 
 # ─── Cloud Run service ────────────────────────────────────────────────────
 resource "google_cloud_run_v2_service" "collector" {
+  # checkov:skip=CKV_GCP_124:public ingress is required by design — Anthropic Cowork backend and Claude Code workstations connect over the public internet. Bearer-token auth on /v1/logs is the access control.
   name     = var.name_prefix
   location = var.region
 

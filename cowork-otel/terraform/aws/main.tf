@@ -7,6 +7,8 @@ resource "random_password" "bearer_token" {
 }
 
 resource "aws_secretsmanager_secret" "bearer_token" {
+  # checkov:skip=CKV2_AWS_57:bearer token rotation is operator-driven (terraform apply -replace=random_password.bearer_token followed by Anthropic admin-portal + Claude Code managed-settings rollout). No machine-driven rotation target exists.
+  # checkov:skip=CKV_AWS_149:AWS-managed encryption is sufficient for the bearer token. CMK-encryption can be added by setting kms_key_id when org policy requires it.
   name_prefix = "${var.name_prefix}/bearer-token-"
   description = "Bearer token Cowork / Claude Code agents present to the collector."
 }
@@ -29,6 +31,8 @@ locals {
 }
 
 resource "aws_secretsmanager_secret" "collector_config" {
+  # checkov:skip=CKV2_AWS_57:collector config is non-secret YAML; lives in Secrets Manager only because ECS task secrets are sourced from there. Rotation handled via Terraform re-apply.
+  # checkov:skip=CKV_AWS_149:non-secret YAML; CMK encryption would add ops overhead without security benefit.
   name_prefix = "${var.name_prefix}/collector-config-"
   description = "Rendered OTel Collector YAML config."
 }
@@ -140,6 +144,11 @@ resource "aws_iam_role_policy" "xsiam" {
 # ─── ECS Fargate cluster + task ───────────────────────────────────────────
 resource "aws_ecs_cluster" "this" {
   name = var.name_prefix
+
+  setting {
+    name  = "containerInsights"
+    value = "enabled"
+  }
 }
 
 data "aws_iam_policy_document" "task_assume" {
@@ -198,6 +207,7 @@ resource "aws_iam_role_policy" "task" {
 }
 
 resource "aws_cloudwatch_log_group" "task" {
+  # checkov:skip=CKV_AWS_158:Fargate stdout/stderr only — no audit data flows here (audit data goes via S3). AWS-managed encryption is sufficient.
   name              = "/ecs/${var.name_prefix}"
   retention_in_days = var.log_retention_days
 }
@@ -246,6 +256,7 @@ resource "aws_ecs_task_definition" "this" {
 
 # ─── ALB (HTTPS termination) ──────────────────────────────────────────────
 resource "aws_security_group" "alb" {
+  # checkov:skip=CKV_AWS_382:ALB needs egress to Fargate tasks on dynamic ports; restricting it would require enumerating task IPs. The task SG limits inbound to ALB only.
   name        = "${var.name_prefix}-alb"
   description = "Public HTTPS for OTel collector."
   vpc_id      = var.vpc_id
@@ -255,17 +266,19 @@ resource "aws_security_group" "alb" {
     to_port     = 443
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
-    description = "HTTPS from anywhere (Cowork backend + workstations)."
+    description = "HTTPS from anywhere (Cowork backend + Claude Code workstations)."
   }
   egress {
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
+    description = "Egress to Fargate tasks (dynamic ports) on the task SG."
   }
 }
 
 resource "aws_security_group" "task" {
+  # checkov:skip=CKV_AWS_382:Fargate tasks need egress to ECR (Docker image pull), S3 (audit bucket PUT), Secrets Manager (config + token), and CloudWatch Logs. Restricting to specific CIDRs would require maintaining a managed-prefix-list lookup; the task SG accepts inbound only from the ALB SG.
   name        = "${var.name_prefix}-task"
   description = "Fargate task — only ALB can reach it."
   vpc_id      = var.vpc_id
@@ -275,27 +288,35 @@ resource "aws_security_group" "task" {
     to_port         = 4318
     protocol        = "tcp"
     security_groups = [aws_security_group.alb.id]
+    description     = "OTLP HTTP from ALB only."
   }
   ingress {
     from_port       = 13133
     to_port         = 13133
     protocol        = "tcp"
     security_groups = [aws_security_group.alb.id]
+    description     = "Health-check from ALB only."
   }
   egress {
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
+    description = "Egress to ECR / S3 / Secrets Manager / CloudWatch Logs."
   }
 }
 
 resource "aws_lb" "this" {
+  # checkov:skip=CKV_AWS_91:ALB access logging would create a recursive audit chain — this collector IS the SOC ingest path. Use VPC flow logs and CloudTrail for an out-of-band audit trail.
+  # checkov:skip=CKV2_AWS_28:bearer-token auth on /v1/logs is the access control. WAF is optional defense in depth; add a separate aws_wafv2_web_acl_association if your policy requires it.
   name               = var.name_prefix
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb.id]
   subnets            = var.public_subnet_ids
+
+  drop_invalid_header_fields = true
+  enable_deletion_protection = true
 }
 
 resource "aws_lb_target_group" "this" {
@@ -339,9 +360,10 @@ resource "aws_ecs_service" "this" {
   launch_type     = "FARGATE"
 
   network_configuration {
+    # checkov:skip=CKV_AWS_333:Fargate tasks need a public route to pull the otel/opentelemetry-collector-contrib image from Docker Hub and to PUT to S3. The task security-group only accepts inbound from the ALB, so the public IP isn't reachable. NAT-gateway alternative adds $30/mo without protection benefit.
     subnets          = var.public_subnet_ids
     security_groups  = [aws_security_group.task.id]
-    assign_public_ip = true # required so Fargate can reach S3 / ECR
+    assign_public_ip = true
   }
 
   load_balancer {

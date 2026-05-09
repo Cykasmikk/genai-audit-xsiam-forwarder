@@ -127,7 +127,9 @@ class StaticHttp:
         self.requests = []
 
     def request(self, method, url, headers=None, body=None):
-        self.requests.append({"method": method, "url": url, "headers": headers, "body": body})
+        self.requests.append(
+            {"method": method, "url": url, "headers": headers, "body": body}
+        )
         return FakeHttpResp(self._status, self._body)
 
 
@@ -152,7 +154,9 @@ class CapturingHttp:
         self.requests = []
 
     def request(self, method, url, headers=None, body=None):
-        self.requests.append({"method": method, "url": url, "headers": headers, "body": body})
+        self.requests.append(
+            {"method": method, "url": url, "headers": headers, "body": body}
+        )
         if not self._responses:
             raise AssertionError(f"Unexpected extra request to {url}")
         status, body = self._responses.pop(0)
@@ -423,7 +427,9 @@ def test_anthropic_pagination_terminates_on_missing_last_id():
 
 
 def test_anthropic_404_message_points_at_path_and_env_var():
-    c = AnthropicComplianceClient("sk-ant-admin01-test", http=StaticHttp(404, b"not found"))
+    c = AnthropicComplianceClient(
+        "sk-ant-admin01-test", http=StaticHttp(404, b"not found")
+    )
     try:
         list(c.fetch_window(NOW - timedelta(minutes=5), NOW))
         raise AssertionError("expected error")
@@ -434,7 +440,9 @@ def test_anthropic_404_message_points_at_path_and_env_var():
 
 
 def test_anthropic_403_message_points_at_enablement_and_scope():
-    c = AnthropicComplianceClient("sk-ant-admin01-test", http=StaticHttp(403, b"forbidden"))
+    c = AnthropicComplianceClient(
+        "sk-ant-admin01-test", http=StaticHttp(403, b"forbidden")
+    )
     try:
         list(c.fetch_window(NOW - timedelta(minutes=5), NOW))
         raise AssertionError("expected error")
@@ -537,8 +545,12 @@ def test_openai_pagination_via_after():
             json.dumps(
                 {
                     "data": [
-                        {"id": "audit_log-1", "effective_at": _unix(NOW - timedelta(minutes=2)),
-                         "type": "login.succeeded", "actor": {"session": {}}}
+                        {
+                            "id": "audit_log-1",
+                            "effective_at": _unix(NOW - timedelta(minutes=2)),
+                            "type": "login.succeeded",
+                            "actor": {"session": {}},
+                        }
                     ],
                     "has_more": True,
                     "last_id": "audit_log-1",
@@ -550,8 +562,12 @@ def test_openai_pagination_via_after():
             json.dumps(
                 {
                     "data": [
-                        {"id": "audit_log-2", "effective_at": _unix(NOW - timedelta(minutes=10)),
-                         "type": "login.failed", "actor": {"session": {}}}
+                        {
+                            "id": "audit_log-2",
+                            "effective_at": _unix(NOW - timedelta(minutes=10)),
+                            "type": "login.failed",
+                            "actor": {"session": {}},
+                        }
                     ],
                     "has_more": False,
                 }
@@ -613,9 +629,15 @@ def test_run_with_openai_through_s3_uses_vendor_prefix():
     assert put["Metadata"] == {"vendor": "openai"}
     # Each line in the gzipped body is a raw OpenAI Audit Log object
     lines = gzip.decompress(put["Body"]).decode().strip().split("\n")
-    parsed = [json.loads(l) for l in lines]
-    assert all("effective_at" in p and isinstance(p["effective_at"], int) for p in parsed)
-    assert [p["id"] for p in parsed] == ["audit_log-abc123", "audit_log-def456", "audit_log-ghi789"]
+    parsed = [json.loads(line) for line in lines]
+    assert all(
+        "effective_at" in p and isinstance(p["effective_at"], int) for p in parsed
+    )
+    assert [p["id"] for p in parsed] == [
+        "audit_log-abc123",
+        "audit_log-def456",
+        "audit_log-ghi789",
+    ]
     print("OK test_run_with_openai_through_s3_uses_vendor_prefix")
 
 
@@ -702,13 +724,21 @@ def test_state_isolation_between_vendors():
             table[self.vendor] = st.to_dict()
 
     # Run Anthropic: watermark advances; OpenAI state unchanged
-    run(FakeAnthropic(ANTHROPIC_EVENTS), S3Egress("b", vendor="anthropic", s3_client=FakeS3Client()),
-        Shared("anthropic"), now=NOW)
+    run(
+        FakeAnthropic(ANTHROPIC_EVENTS),
+        S3Egress("b", vendor="anthropic", s3_client=FakeS3Client()),
+        Shared("anthropic"),
+        now=NOW,
+    )
     assert "anthropic" in table and "openai" not in table
 
     # Run OpenAI: independent watermark
-    run(FakeOpenAI(OPENAI_EVENTS), S3Egress("b", vendor="openai", s3_client=FakeS3Client()),
-        Shared("openai"), now=NOW)
+    run(
+        FakeOpenAI(OPENAI_EVENTS),
+        S3Egress("b", vendor="openai", s3_client=FakeS3Client()),
+        Shared("openai"),
+        now=NOW,
+    )
     assert "openai" in table
 
     a_wm = table["anthropic"]["watermark"]
@@ -741,10 +771,18 @@ def test_cross_vendor_dedupe_no_collision():
     o_evs = [
         {**OPENAI_EVENTS[0], "id": "x"},
     ]
-    run(FakeAnthropic(a_evs), S3Egress("b", vendor="anthropic", s3_client=FakeS3Client()),
-        Shared("anthropic"), now=NOW)
-    run(FakeOpenAI(o_evs), S3Egress("b", vendor="openai", s3_client=FakeS3Client()),
-        Shared("openai"), now=NOW)
+    run(
+        FakeAnthropic(a_evs),
+        S3Egress("b", vendor="anthropic", s3_client=FakeS3Client()),
+        Shared("anthropic"),
+        now=NOW,
+    )
+    run(
+        FakeOpenAI(o_evs),
+        S3Egress("b", vendor="openai", s3_client=FakeS3Client()),
+        Shared("openai"),
+        now=NOW,
+    )
     # Each run forwarded its event; namespace prevented dedupe across vendors
     assert table["anthropic"]["recent_ids"] == ["x"]
     assert table["openai"]["recent_ids"] == ["x"]
@@ -753,8 +791,12 @@ def test_cross_vendor_dedupe_no_collision():
 
 def test_dedupe_with_overlap_window():
     store = MemStore("anthropic")
-    run(FakeAnthropic(ANTHROPIC_EVENTS), S3Egress("b", vendor="anthropic", s3_client=FakeS3Client()),
-        store, now=NOW)
+    run(
+        FakeAnthropic(ANTHROPIC_EVENTS),
+        S3Egress("b", vendor="anthropic", s3_client=FakeS3Client()),
+        store,
+        now=NOW,
+    )
 
     # 5 min later, query window is [watermark - 5min, later]. Only the events
     # within that window will reach the dedupe check; older fixture events
@@ -766,8 +808,12 @@ def test_dedupe_with_overlap_window():
         "created_at": _iso(later - timedelta(seconds=30)),
     }
     fake = FakeS3Client()
-    s = run(FakeAnthropic(ANTHROPIC_EVENTS + [new_event]),
-            S3Egress("b", vendor="anthropic", s3_client=fake), store, now=later)
+    s = run(
+        FakeAnthropic(ANTHROPIC_EVENTS + [new_event]),
+        S3Egress("b", vendor="anthropic", s3_client=fake),
+        store,
+        now=later,
+    )
     # ANTHROPIC_EVENTS[1] is at NOW-4min; second run window starts at
     # watermark-5min = NOW-4min-5min = NOW-9min, so it falls inside and gets
     # deduped. ANTHROPIC_EVENTS[0] at NOW-10min falls outside. new_event is
@@ -814,11 +860,19 @@ def test_constants_match_specs():
 
 
 def test_summary_includes_vendor():
-    s = run(FakeAnthropic([]), S3Egress("b", vendor="anthropic", s3_client=FakeS3Client()),
-            MemStore("anthropic"), now=NOW)
+    s = run(
+        FakeAnthropic([]),
+        S3Egress("b", vendor="anthropic", s3_client=FakeS3Client()),
+        MemStore("anthropic"),
+        now=NOW,
+    )
     assert s["vendor"] == "anthropic"
-    s = run(FakeOpenAI([]), S3Egress("b", vendor="openai", s3_client=FakeS3Client()),
-            MemStore("openai"), now=NOW)
+    s = run(
+        FakeOpenAI([]),
+        S3Egress("b", vendor="openai", s3_client=FakeS3Client()),
+        MemStore("openai"),
+        now=NOW,
+    )
     assert s["vendor"] == "openai"
     print("OK test_summary_includes_vendor")
 
@@ -873,18 +927,24 @@ def test_parallel_execution_no_contention():
 
     bucket = SharedBucket()
     threads = [
-        threading.Thread(target=run_one, args=(
-            FakeAnthropic(ANTHROPIC_EVENTS),
-            S3Egress("audit-bucket", vendor="anthropic", s3_client=bucket),
-            SharedTableStore("anthropic"),
-            "anthropic",
-        )),
-        threading.Thread(target=run_one, args=(
-            FakeOpenAI(OPENAI_EVENTS),
-            S3Egress("audit-bucket", vendor="openai", s3_client=bucket),
-            SharedTableStore("openai"),
-            "openai",
-        )),
+        threading.Thread(
+            target=run_one,
+            args=(
+                FakeAnthropic(ANTHROPIC_EVENTS),
+                S3Egress("audit-bucket", vendor="anthropic", s3_client=bucket),
+                SharedTableStore("anthropic"),
+                "anthropic",
+            ),
+        ),
+        threading.Thread(
+            target=run_one,
+            args=(
+                FakeOpenAI(OPENAI_EVENTS),
+                S3Egress("audit-bucket", vendor="openai", s3_client=bucket),
+                SharedTableStore("openai"),
+                "openai",
+            ),
+        ),
     ]
     for t in threads:
         t.start()
@@ -895,7 +955,9 @@ def test_parallel_execution_no_contention():
     assert len(summaries) == 2
 
     # Each vendor forwarded its own count
-    assert summaries["anthropic"]["forwarded"] == len(ANTHROPIC_EVENTS), summaries["anthropic"]
+    assert summaries["anthropic"]["forwarded"] == len(ANTHROPIC_EVENTS), summaries[
+        "anthropic"
+    ]
     assert summaries["openai"]["forwarded"] == len(OPENAI_EVENTS), summaries["openai"]
 
     # State stays vendor-namespaced
@@ -936,7 +998,12 @@ def test_anthropic_chats_requires_compliance_access_key():
 def test_anthropic_chats_emits_one_event_per_message():
     list_resp = json.dumps(
         {
-            "data": [{"id": "claude_chat_abc", "updated_at": _iso(NOW - timedelta(minutes=5))}],
+            "data": [
+                {
+                    "id": "claude_chat_abc",
+                    "updated_at": _iso(NOW - timedelta(minutes=5)),
+                }
+            ],
             "has_more": False,
         }
     ).encode()
@@ -948,10 +1015,18 @@ def test_anthropic_chats_emits_one_event_per_message():
             "project_id": "claude_proj_abc",
             "user": {"id": "user_alice", "email_address": "alice@example.com"},
             "chat_messages": [
-                {"id": "msg_1", "role": "user", "created_at": _iso(NOW - timedelta(minutes=4)),
-                 "content": [{"type": "text", "text": "what's the plan?"}]},
-                {"id": "msg_2", "role": "assistant", "created_at": _iso(NOW - timedelta(minutes=3)),
-                 "content": [{"type": "text", "text": "here's the plan..."}]},
+                {
+                    "id": "msg_1",
+                    "role": "user",
+                    "created_at": _iso(NOW - timedelta(minutes=4)),
+                    "content": [{"type": "text", "text": "what's the plan?"}],
+                },
+                {
+                    "id": "msg_2",
+                    "role": "assistant",
+                    "created_at": _iso(NOW - timedelta(minutes=3)),
+                    "content": [{"type": "text", "text": "here's the plan..."}],
+                },
             ],
         }
     ).encode()
@@ -994,7 +1069,9 @@ def test_anthropic_chats_404_message():
 
 
 def test_anthropic_chats_403_warns_about_admin_key():
-    c = AnthropicChatContentClient("sk-ant-api01-test", http=StaticHttp(403, b"forbidden"))
+    c = AnthropicChatContentClient(
+        "sk-ant-api01-test", http=StaticHttp(403, b"forbidden")
+    )
     try:
         list(c.fetch_window(NOW - timedelta(minutes=5), NOW))
         raise AssertionError
@@ -1019,8 +1096,9 @@ def test_anthropic_chats_skips_individual_failed_chat():
         {
             "id": "claude_chat_good",
             "user": {"id": "u"},
-            "chat_messages": [{"id": "msg_g", "role": "user",
-                               "created_at": _iso(NOW), "content": []}],
+            "chat_messages": [
+                {"id": "msg_g", "role": "user", "created_at": _iso(NOW), "content": []}
+            ],
         }
     ).encode()
     # 4 attempts of 500 = exhausted retries on the bad chat
@@ -1051,10 +1129,18 @@ def test_openai_conversations_handles_per_message_response():
     body = json.dumps(
         {
             "data": [
-                {"id": "msg-1", "effective_at": _unix(NOW - timedelta(minutes=2)),
-                 "role": "user", "content": "hi"},
-                {"id": "msg-2", "effective_at": _unix(NOW - timedelta(minutes=1)),
-                 "role": "assistant", "content": "hello"},
+                {
+                    "id": "msg-1",
+                    "effective_at": _unix(NOW - timedelta(minutes=2)),
+                    "role": "user",
+                    "content": "hi",
+                },
+                {
+                    "id": "msg-2",
+                    "effective_at": _unix(NOW - timedelta(minutes=1)),
+                    "role": "assistant",
+                    "content": "hello",
+                },
             ],
             "has_more": False,
         }
@@ -1078,10 +1164,18 @@ def test_openai_conversations_handles_per_conversation_response():
                     "effective_at": _unix(NOW - timedelta(minutes=5)),
                     "workspace_id": "ws-1",
                     "messages": [
-                        {"id": "m1", "effective_at": _unix(NOW - timedelta(minutes=5)),
-                         "role": "user", "content": "q"},
-                        {"id": "m2", "effective_at": _unix(NOW - timedelta(minutes=4)),
-                         "role": "assistant", "content": "a"},
+                        {
+                            "id": "m1",
+                            "effective_at": _unix(NOW - timedelta(minutes=5)),
+                            "role": "user",
+                            "content": "q",
+                        },
+                        {
+                            "id": "m2",
+                            "effective_at": _unix(NOW - timedelta(minutes=4)),
+                            "role": "assistant",
+                            "content": "a",
+                        },
                     ],
                 }
             ],
@@ -1149,18 +1243,36 @@ def test_pubsub_emits_vendor_attribute_for_all_four():
     """Pub/Sub egress must tag every message with vendor= so XSIAM can route."""
     cases = [
         ("anthropic", ANTHROPIC_EVENTS[0]),
-        ("anthropic_chats", {
-            "chat": {"id": "claude_chat_abc", "organization_id": "org_x",
-                     "project_id": "p1", "user": {"id": "user_alice"}},
-            "message": {"id": "msg_1", "role": "user",
-                        "created_at": _iso(NOW), "content": []},
-        }),
+        (
+            "anthropic_chats",
+            {
+                "chat": {
+                    "id": "claude_chat_abc",
+                    "organization_id": "org_x",
+                    "project_id": "p1",
+                    "user": {"id": "user_alice"},
+                },
+                "message": {
+                    "id": "msg_1",
+                    "role": "user",
+                    "created_at": _iso(NOW),
+                    "content": [],
+                },
+            },
+        ),
         ("openai", OPENAI_EVENTS[0]),
-        ("openai_conversations", {
-            "conversation": {"id": "conv-abc", "workspace_id": "ws-1"},
-            "message": {"id": "msg_1", "role": "user",
-                        "effective_at": _unix(NOW), "model": "gpt-4o"},
-        }),
+        (
+            "openai_conversations",
+            {
+                "conversation": {"id": "conv-abc", "workspace_id": "ws-1"},
+                "message": {
+                    "id": "msg_1",
+                    "role": "user",
+                    "effective_at": _unix(NOW),
+                    "model": "gpt-4o",
+                },
+            },
+        ),
     ]
     for vendor, ev in cases:
         pub = FakePublisher()
@@ -1174,10 +1286,18 @@ def test_pubsub_anthropic_chats_attributes():
     pub = FakePublisher()
     e = PubSubEgress("p", "t", vendor="anthropic_chats", publisher=pub)
     ev = {
-        "chat": {"id": "claude_chat_abc", "organization_id": "org_x",
-                 "project_id": "p1", "user": {"id": "user_alice"}},
-        "message": {"id": "msg_1", "role": "user",
-                    "created_at": _iso(NOW), "content": []},
+        "chat": {
+            "id": "claude_chat_abc",
+            "organization_id": "org_x",
+            "project_id": "p1",
+            "user": {"id": "user_alice"},
+        },
+        "message": {
+            "id": "msg_1",
+            "role": "user",
+            "created_at": _iso(NOW),
+            "content": [],
+        },
     }
     e.send([ev])
     a = pub.published[0]["attrs"]
@@ -1195,8 +1315,12 @@ def test_pubsub_openai_conversations_attributes():
     e = PubSubEgress("p", "t", vendor="openai_conversations", publisher=pub)
     ev = {
         "conversation": {"id": "conv-abc", "workspace_id": "ws-1"},
-        "message": {"id": "msg_1", "role": "assistant",
-                    "effective_at": _unix(NOW), "model": "gpt-4o"},
+        "message": {
+            "id": "msg_1",
+            "role": "assistant",
+            "effective_at": _unix(NOW),
+            "model": "gpt-4o",
+        },
     }
     e.send([ev])
     a = pub.published[0]["attrs"]
@@ -1212,12 +1336,18 @@ def test_http_envelope_for_chats_and_conversations():
     """HTTP fallback envelope picks the right _time field for wrapped payloads."""
     # anthropic_chats
     http = CapturingHttp((202, b""))
-    e = HttpEgress(HttpEgressConfig(url="https://col/", token="t",
-                                    vendor="anthropic_chats"), http=http)
+    e = HttpEgress(
+        HttpEgressConfig(url="https://col/", token="t", vendor="anthropic_chats"),
+        http=http,
+    )
     ev = {
         "chat": {"id": "c"},
-        "message": {"id": "m1", "role": "user",
-                    "created_at": "2026-05-08T10:00:00Z", "content": []},
+        "message": {
+            "id": "m1",
+            "role": "user",
+            "created_at": "2026-05-08T10:00:00Z",
+            "content": [],
+        },
     }
     e.send([ev])
     body = json.loads(gzip.decompress(http.requests[0]["body"]).decode())
@@ -1228,8 +1358,10 @@ def test_http_envelope_for_chats_and_conversations():
 
     # openai_conversations
     http = CapturingHttp((202, b""))
-    e = HttpEgress(HttpEgressConfig(url="https://col/", token="t",
-                                    vendor="openai_conversations"), http=http)
+    e = HttpEgress(
+        HttpEgressConfig(url="https://col/", token="t", vendor="openai_conversations"),
+        http=http,
+    )
     ev = {
         "conversation": {"id": "c"},
         "message": {"id": "m1", "role": "user", "effective_at": _unix(NOW)},
@@ -1279,8 +1411,12 @@ def test_parallel_repeated_runs_dedupe_correctly():
 
     def go():
         barrier.wait()
-        run(FakeAnthropic(ANTHROPIC_EVENTS), CountingEgress(),
-            SharedTableStore("anthropic"), now=NOW)
+        run(
+            FakeAnthropic(ANTHROPIC_EVENTS),
+            CountingEgress(),
+            SharedTableStore("anthropic"),
+            now=NOW,
+        )
 
     threads = [threading.Thread(target=go), threading.Thread(target=go)]
     for t in threads:

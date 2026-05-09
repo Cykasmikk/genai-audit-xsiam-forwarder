@@ -76,7 +76,7 @@ variable "collector_image" {
 }
 
 variable "log_retention_days" {
-  description = "CloudWatch log retention for the collector."
+  description = "CloudWatch log retention for the collector. Default 365 to align with typical SOC-2 / ISO retention requirements."
   type        = number
-  default     = 30
+  default     = 365
 }

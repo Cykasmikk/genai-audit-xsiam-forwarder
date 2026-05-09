@@ -15,7 +15,7 @@ the time window.
 | `anthropic` | Admin/auth/system + resource activity (~200 event types) | [Anthropic Compliance API Rev J 2026-04-20](vendors/anthropic.md) |
 | `anthropic_chats` | Full Claude.ai chat transcripts: prompts, responses, file references, artifacts | Same Rev J PDF, content endpoints |
 | `openai` | Admin/auth/project activity (51 event types) | [OpenAI Audit Logs API](vendors/openai.md#audit-logs-api) |
-| `openai_conversations` | Full ChatGPT Enterprise/Edu conversation transcripts | Skeleton — see [Coverage gaps](#coverage-gaps) |
+| `openai_conversations` | Full ChatGPT Enterprise/Edu conversation transcripts via the Compliance Logs Platform | Conforms to the [OpenAI cookbook spec](https://developers.openai.com/cookbook/examples/chatgpt/compliance_api/logs_platform) |
 | Cowork OTel | Cowork + Claude Code prompts, tool calls, file access, model + token + cost per request | Standard OTel logs/metrics |
 
 ## Full event-type inventories
@@ -80,12 +80,24 @@ file reference (see [volume warning](#volume-warning)).
 
 `api_key.{created,updated,deleted}` • `certificate.{created,updated,deleted,activated,deactivated}` • `checkpoint.permission.{created,deleted}` • `external_key.{registered,removed}` • `group.{created,updated,deleted}` • `invite.{sent,accepted,deleted}` • `ip_allowlist.{created,updated,deleted,config.activated,config.deactivated}` • `login.{succeeded,failed}` • `logout.{succeeded,failed}` • `organization.updated` • `project.{created,updated,archived,deleted}` • `rate_limit.{updated,deleted}` • `resource.deleted` • `tunnel.{created,updated,deleted}` • `role.{created,updated,deleted}` • `role.assignment.{created,deleted}` • `scim.{enabled,disabled}` • `service_account.{created,updated,deleted}` • `user.{added,updated,deleted}`
 
-### `openai_conversations` — ChatGPT conversation transcripts
+### `openai_conversations` — Compliance Logs Platform
 
-Schema not publicly documented. The adapter handles both plausible
-response shapes (per-message and per-conversation with embedded
-messages) and synthesizes a content-hash event id when the response
-omits one. See [Coverage gaps](#coverage-gaps) below.
+Two-stage delivery: list JSONL log files for a workspace (or org) in
+a time window, then download each file. Each event in the JSONL
+corresponds to one record from one of the documented categories:
+conversations, files, workspace users, memories, codex, auth log,
+admin audit. Wrapped payload shape:
+
+```json
+{
+  "file_id": "log-file-…",
+  "list_entry": {"id": "log-file-…", "event_type": "conversations", "end_time": "…"},
+  "record": {/* the original JSONL line — schema varies by event_type */}
+}
+```
+
+See [vendors/openai.md](vendors/openai.md#openai_conversations--compliance-logs-platform)
+for the full setup detail.
 
 ### Cowork OTel
 
@@ -164,14 +176,14 @@ To audit programmatic API usage:
   [LiteLLM proxy](https://docs.litellm.ai/), Bricklayer) and forward
   proxy access logs to XSIAM.
 
-### 3. Cloud-deployed model usage
+### 2. Cloud-deployed model usage
 
 - **AWS Bedrock Claude:** doesn't appear in Anthropic's Compliance API.
   Use [CloudTrail Bedrock data events](https://docs.aws.amazon.com/bedrock/latest/userguide/logging-using-cloudtrail.html). Wire as a separate XSIAM data source; not in this repo's scope.
 - **Azure OpenAI:** doesn't appear in OpenAI's Audit Logs. Use
   [Azure Monitor / Activity Logs](https://learn.microsoft.com/en-us/azure/azure-monitor/essentials/activity-log). Separate XSIAM data source.
 
-### 4. Personal/consumer usage outside an org
+### 3. Personal/consumer usage outside an org
 
 ChatGPT Free/Plus and Claude.ai personal accounts aren't part of an
 enterprise audit scope and aren't covered. By design.

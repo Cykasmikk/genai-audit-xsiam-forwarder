@@ -6,6 +6,24 @@ the project follows [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+### Changed
+
+- **`openai_conversations` adapter rewritten against the real cookbook
+  spec.** Previously a skeleton aligned with the Audit Logs API
+  conventions, now conforms to the OpenAI Compliance Logs Platform
+  cookbook (<https://developers.openai.com/cookbook/examples/chatgpt/compliance_api/logs_platform>).
+  Architectural differences captured:
+  - Different host (`api.chatgpt.com`, not `api.openai.com`)
+  - Two-stage retrieval (list JSONL log files, then download each)
+  - Workspace-scoped path
+    (`/v1/compliance/{scope}/{principal_id}/logs`)
+  - Distinct Compliance API key (not the Admin key)
+  - Adapter fails closed at construction time without
+    `OPENAI_PRINCIPAL_ID`
+- Smoke suite expanded to 48 cases covering the two-stage retrieval,
+  malformed-JSONL-line tolerance, synthetic-id generation, and the
+  cookbook-pointing 404 error message.
+
 ## [0.1.0] — 2026-05-09
 
 Initial public release.
@@ -18,8 +36,8 @@ Initial public release.
   - `anthropic_chats` — Anthropic Compliance API chat content (Rev J)
   - `openai` — OpenAI Audit Logs API
   - `openai_conversations` — OpenAI Compliance Logs Platform conversations
-    (skeleton — endpoint not publicly documented; see
-    [docs/coverage.md](docs/coverage.md#coverage-gaps))
+    + audit-log files via the cookbook spec at
+    <https://developers.openai.com/cookbook/examples/chatgpt/compliance_api/logs_platform>
   - `cowork-otel/` — standalone OpenTelemetry Collector deployment for
     Anthropic Cowork backend + Claude Code workstations
 
@@ -66,17 +84,14 @@ Initial public release.
 
 ### Documented gaps
 
-- **OpenAI Conversations adapter is a skeleton.** The Compliance Logs
-  Platform conversations endpoint is gated behind OpenAI Enterprise and
-  not publicly documented. The adapter ships with educated defaults
-  aligned with the sibling Audit Logs API and is overridable via env
-  var (`OPENAI_CONVERSATIONS_PATH`). Recommended path for production
-  is Palo Alto Networks' native XSIAM "OpenAI ChatGPT Enterprise
-  Compliance" integration if available.
-
 - **Cowork OTel collector** has been built and validates clean but has
   not been live-deployed end-to-end. Recommended to do a live test
   before relying on it in production.
+
+- **`openai_conversations` adapter** has been rewritten against the
+  real cookbook spec but has not been live-deployed against a real
+  Compliance API key. Same caveat as Cowork OTel — recommended to
+  prove out before production reliance.
 
 - **Programmatic API call bodies** (Claude API, OpenAI API) are not
   retained server-side by either vendor. To audit them, use

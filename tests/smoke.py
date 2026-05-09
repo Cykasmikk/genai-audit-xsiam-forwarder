@@ -1113,127 +1113,124 @@ def test_anthropic_chats_skips_individual_failed_chat():
 # ── OpenAI Conversations (openai_conversations) ────────────────────────────
 
 
-def test_openai_conversations_admin_key_required():
-    OpenAIConversationsClient("sk-admin-test")
-    for bad in ("sk-test", "sk-ant-admin01-test"):
-        try:
-            OpenAIConversationsClient(bad)
-            raise AssertionError
-        except ValueError as e:
-            assert "sk-admin-" in str(e)
-    print("OK test_openai_conversations_admin_key_required")
+def test_openai_conversations_compliance_key_accepted():
+    # Compliance API key prefix isn't publicly documented; we only
+    # require non-empty + a principal_id.
+    OpenAIConversationsClient("any-non-empty-token", principal_id="ws-uuid")
+    print("OK test_openai_conversations_compliance_key_accepted")
 
 
-def test_openai_conversations_handles_per_message_response():
-    # If the spec returns flat per-message records.
-    body = json.dumps(
+def test_openai_conversations_principal_required():
+    # Must fail closed without a workspace/org id.
+    try:
+        OpenAIConversationsClient("token")
+        raise AssertionError("expected ValueError when principal_id missing")
+    except ValueError as e:
+        assert "OPENAI_PRINCIPAL_ID" in str(e)
+    print("OK test_openai_conversations_principal_required")
+
+
+def test_openai_conversations_two_stage_retrieval():
+    # Stage 1: list returns 1 file. Stage 2: that file's JSONL has 2 records.
+    list_body = json.dumps(
         {
             "data": [
                 {
-                    "id": "msg-1",
-                    "effective_at": _unix(NOW - timedelta(minutes=2)),
-                    "role": "user",
-                    "content": "hi",
-                },
-                {
-                    "id": "msg-2",
-                    "effective_at": _unix(NOW - timedelta(minutes=1)),
-                    "role": "assistant",
-                    "content": "hello",
-                },
+                    "id": "log-file-001",
+                    "event_type": "conversations",
+                    "end_time": _iso(NOW - timedelta(minutes=2)),
+                }
             ],
             "has_more": False,
+            "last_end_time": _iso(NOW - timedelta(minutes=2)),
         }
     ).encode()
-    http = CapturingHttp((200, body))
-    c = OpenAIConversationsClient("sk-admin-test", http=http)
+    jsonl_body = (
+        b'{"id":"msg-1","conversation_id":"c1","timestamp":"'
+        + _iso(NOW - timedelta(minutes=3)).encode()
+        + b'","role":"user","content":"hi"}\n'
+        + b'{"id":"msg-2","conversation_id":"c1","timestamp":"'
+        + _iso(NOW - timedelta(minutes=2)).encode()
+        + b'","role":"assistant","content":"hello"}\n'
+    )
+    http = ScriptedHttp([(200, list_body), (200, jsonl_body)])
+    c = OpenAIConversationsClient("token", principal_id="ws-uuid", http=http)
     events = list(c.fetch_window(NOW - timedelta(minutes=10), NOW))
     assert len(events) == 2
     assert events[0].id == "msg-1" and events[1].id == "msg-2"
     assert events[0].vendor == "openai_conversations"
-    print("OK test_openai_conversations_handles_per_message_response")
-
-
-def test_openai_conversations_handles_per_conversation_response():
-    # If the spec returns conversation-level records with embedded messages.
-    body = json.dumps(
-        {
-            "data": [
-                {
-                    "id": "conv-abc",
-                    "effective_at": _unix(NOW - timedelta(minutes=5)),
-                    "workspace_id": "ws-1",
-                    "messages": [
-                        {
-                            "id": "m1",
-                            "effective_at": _unix(NOW - timedelta(minutes=5)),
-                            "role": "user",
-                            "content": "q",
-                        },
-                        {
-                            "id": "m2",
-                            "effective_at": _unix(NOW - timedelta(minutes=4)),
-                            "role": "assistant",
-                            "content": "a",
-                        },
-                    ],
-                }
-            ],
-            "has_more": False,
-        }
-    ).encode()
-    http = CapturingHttp((200, body))
-    c = OpenAIConversationsClient("sk-admin-test", http=http)
-    events = list(c.fetch_window(NOW - timedelta(minutes=10), NOW))
-    assert len(events) == 2
-    assert events[0].id == "m1" and events[1].id == "m2"
-    # Each event wraps {conversation: meta, message: ...}
-    assert events[0].raw["conversation"]["id"] == "conv-abc"
-    assert events[0].raw["message"]["role"] == "user"
-    print("OK test_openai_conversations_handles_per_conversation_response")
+    # Each event wraps {file_id, list_entry, record}
+    assert events[0].raw["file_id"] == "log-file-001"
+    assert events[0].raw["list_entry"]["event_type"] == "conversations"
+    assert events[0].raw["record"]["role"] == "user"
+    print("OK test_openai_conversations_two_stage_retrieval")
 
 
 def test_openai_conversations_synthesizes_id_when_missing():
-    # If the spec is vague and a record arrives without id, dedupe must
-    # still work — adapter synthesizes a stable hash.
-    body = json.dumps(
+    list_body = json.dumps(
         {
-            "data": [{"effective_at": _unix(NOW), "role": "user", "content": "x"}],
+            "data": [{"id": "log-file-002", "end_time": _iso(NOW)}],
             "has_more": False,
         }
     ).encode()
-    http = CapturingHttp((200, body))
-    c = OpenAIConversationsClient("sk-admin-test", http=http)
+    # JSONL line with no id field at all
+    jsonl_body = b'{"timestamp":"2026-05-09T10:00:00Z","role":"user"}\n'
+    http = ScriptedHttp([(200, list_body), (200, jsonl_body)])
+    c = OpenAIConversationsClient("token", principal_id="ws-uuid", http=http)
     events = list(c.fetch_window(NOW - timedelta(minutes=10), NOW))
     assert len(events) == 1
-    assert events[0].id.startswith("synthetic_")
+    assert events[0].id.startswith("synthetic_log-file-002_")
     print("OK test_openai_conversations_synthesizes_id_when_missing")
 
 
-def test_openai_conversations_request_uses_bracket_filter():
+def test_openai_conversations_request_format():
     body = json.dumps({"data": [], "has_more": False}).encode()
     http = CapturingHttp((200, body))
-    c = OpenAIConversationsClient("sk-admin-test", workspace_id="ws-1", http=http)
+    c = OpenAIConversationsClient(
+        "token", principal_id="ws-uuid", scope="workspaces", http=http
+    )
     list(c.fetch_window(NOW - timedelta(minutes=10), NOW))
-    parsed = urlparse(http.requests[0]["url"])
+    req = http.requests[0]
+    parsed = urlparse(req["url"])
+    # Path is /v1/compliance/{scope}/{principal_id}/logs at api.chatgpt.com
+    assert parsed.path == "/v1/compliance/workspaces/ws-uuid/logs"
     qs = parse_qs(parsed.query)
-    # Same bracketed Unix-seconds filter as audit logs
-    assert "effective_at[gte]" in qs and "effective_at[lte]" in qs
-    assert qs["workspace_id"] == ["ws-1"]
-    assert http.requests[0]["headers"]["Authorization"] == "Bearer sk-admin-test"
-    print("OK test_openai_conversations_request_uses_bracket_filter")
+    assert "after" in qs and "limit" in qs
+    assert req["headers"]["Authorization"] == "Bearer token"
+    print("OK test_openai_conversations_request_format")
 
 
-def test_openai_conversations_404_message_points_at_palo_native():
-    c = OpenAIConversationsClient("sk-admin-test", http=StaticHttp(404, b"nope"))
+def test_openai_conversations_skips_malformed_jsonl_line():
+    list_body = json.dumps(
+        {
+            "data": [{"id": "log-file-003", "end_time": _iso(NOW)}],
+            "has_more": False,
+        }
+    ).encode()
+    # Mix of valid and malformed lines
+    jsonl_body = (
+        b'{"id":"good-1","timestamp":"2026-05-09T10:00:00Z"}\n'
+        b"this is not json\n"
+        b'{"id":"good-2","timestamp":"2026-05-09T10:01:00Z"}\n'
+    )
+    http = ScriptedHttp([(200, list_body), (200, jsonl_body)])
+    c = OpenAIConversationsClient("token", principal_id="ws-uuid", http=http)
+    events = list(c.fetch_window(NOW - timedelta(minutes=10), NOW))
+    assert [e.id for e in events] == ["good-1", "good-2"]
+    print("OK test_openai_conversations_skips_malformed_jsonl_line")
+
+
+def test_openai_conversations_404_message_points_at_cookbook():
+    c = OpenAIConversationsClient(
+        "token", principal_id="ws-uuid", http=StaticHttp(404, b"nope")
+    )
     try:
         list(c.fetch_window(NOW - timedelta(minutes=5), NOW))
         raise AssertionError
     except OpenAIConversationsAPIError as e:
-        # Help operators find the alternative
-        assert "Palo Alto" in str(e) or "palo" in str(e).lower()
-        assert "OPENAI_CONVERSATIONS_PATH" in str(e)
-    print("OK test_openai_conversations_404_message_points_at_palo_native")
+        assert "api.chatgpt.com" in str(e)
+        assert "OPENAI_COMPLIANCE_API_BASE" in str(e)
+    print("OK test_openai_conversations_404_message_points_at_cookbook")
 
 
 # ── Cross-vendor with all four feeds ───────────────────────────────────────
@@ -1264,11 +1261,13 @@ def test_pubsub_emits_vendor_attribute_for_all_four():
         (
             "openai_conversations",
             {
-                "conversation": {"id": "conv-abc", "workspace_id": "ws-1"},
-                "message": {
-                    "id": "msg_1",
+                "file_id": "log-file-001",
+                "list_entry": {"event_type": "conversations"},
+                "record": {
+                    "id": "msg-1",
+                    "conversation_id": "c1",
+                    "user_id": "u-bob",
                     "role": "user",
-                    "effective_at": _unix(NOW),
                     "model": "gpt-4o",
                 },
             },
@@ -1314,21 +1313,27 @@ def test_pubsub_openai_conversations_attributes():
     pub = FakePublisher()
     e = PubSubEgress("p", "t", vendor="openai_conversations", publisher=pub)
     ev = {
-        "conversation": {"id": "conv-abc", "workspace_id": "ws-1"},
-        "message": {
-            "id": "msg_1",
+        "file_id": "log-file-001",
+        "list_entry": {"event_type": "conversations"},
+        "record": {
+            "id": "msg-1",
+            "conversation_id": "c1",
+            "workspace_id": "ws-1",
+            "user_id": "u-bob",
             "role": "assistant",
-            "effective_at": _unix(NOW),
             "model": "gpt-4o",
         },
     }
     e.send([ev])
     a = pub.published[0]["attrs"]
     assert a["vendor"] == "openai_conversations"
-    assert a["conversation_id"] == "conv-abc"
+    assert a["log_file_id"] == "log-file-001"
+    assert a["event_type"] == "conversations"
+    assert a["conversation_id"] == "c1"
     assert a["workspace_id"] == "ws-1"
-    assert a["model"] == "gpt-4o"
+    assert a["actor_user_id"] == "u-bob"
     assert a["message_role"] == "assistant"
+    assert a["model"] == "gpt-4o"
     print("OK test_pubsub_openai_conversations_attributes")
 
 
@@ -1363,15 +1368,20 @@ def test_http_envelope_for_chats_and_conversations():
         http=http,
     )
     ev = {
-        "conversation": {"id": "c"},
-        "message": {"id": "m1", "role": "user", "effective_at": _unix(NOW)},
+        "file_id": "log-file-001",
+        "list_entry": {"event_type": "conversations"},
+        "record": {
+            "id": "m1",
+            "role": "user",
+            "timestamp": "2026-05-09T10:00:00Z",
+        },
     }
     e.send([ev])
     body = json.loads(gzip.decompress(http.requests[0]["body"]).decode())
     assert body[0]["_vendor"] == "openai_conversations"
-    assert body[0]["_event"] == "openai_conversation_message"
-    parsed = datetime.fromisoformat(body[0]["_time"].replace("Z", "+00:00"))
-    assert int(parsed.timestamp()) == int(NOW.timestamp())
+    # _event reflects the JSONL stream's event_type from the list response
+    assert body[0]["_event"] == "conversations"
+    assert body[0]["_time"] == "2026-05-09T10:00:00Z"
     print("OK test_http_envelope_for_chats_and_conversations")
 
 
@@ -1481,12 +1491,13 @@ TESTS = [
     test_anthropic_chats_403_warns_about_admin_key,
     test_anthropic_chats_skips_individual_failed_chat,
     # OpenAI conversations
-    test_openai_conversations_admin_key_required,
-    test_openai_conversations_handles_per_message_response,
-    test_openai_conversations_handles_per_conversation_response,
+    test_openai_conversations_compliance_key_accepted,
+    test_openai_conversations_principal_required,
+    test_openai_conversations_two_stage_retrieval,
     test_openai_conversations_synthesizes_id_when_missing,
-    test_openai_conversations_request_uses_bracket_filter,
-    test_openai_conversations_404_message_points_at_palo_native,
+    test_openai_conversations_request_format,
+    test_openai_conversations_skips_malformed_jsonl_line,
+    test_openai_conversations_404_message_points_at_cookbook,
     # Cross-feed Pub/Sub + HTTP envelope
     test_pubsub_emits_vendor_attribute_for_all_four,
     test_pubsub_anthropic_chats_attributes,

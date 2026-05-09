@@ -16,7 +16,7 @@ inference visibility:**
 | `anthropic` | Anthropic Compliance API Activity Feed (~200 admin/auth/resource event types) | ✅ Production (Rev J 2026-04-20) |
 | `anthropic_chats` | Full Claude.ai chat transcripts (prompts, responses, files) | ✅ Production (Rev J) |
 | `openai` | OpenAI Audit Logs (51 admin/auth/project event types) | ✅ Production |
-| `openai_conversations` | Full ChatGPT Enterprise/Edu conversation transcripts | ⚠️ Skeleton — endpoint not publicly documented; see [docs/coverage.md](docs/coverage.md#coverage-gaps) |
+| `openai_conversations` | Full ChatGPT Enterprise/Edu conversation transcripts via Compliance Logs Platform | ✅ Production (cookbook spec) |
 | Cowork OTel | Claude Code + Cowork prompts, tool calls, file access, model + token + cost per request | ✅ Production |
 
 > **Designed for full-take SOC ingestion.** Audit metadata, chat
@@ -147,8 +147,8 @@ tests/smoke.py        47 deterministic tests (no AWS/GCP creds needed)
   - Anthropic Compliance API: **Rev J 2026-04-20** (Activity Feed +
     chat content endpoints fully wired)
   - OpenAI Audit Logs API: latest publicly documented (verified May 2026)
-  - OpenAI Conversations API: skeleton — see
-    [docs/coverage.md](docs/coverage.md#coverage-gaps)
+  - OpenAI Compliance Logs Platform: cookbook spec
+    (`api.chatgpt.com/v1/compliance/{scope}/{principal_id}/logs`)
 - CI enforces 47-case smoke suite + `terraform fmt -check` +
   `terraform validate` on every PR.
 - License: Apache 2.0.

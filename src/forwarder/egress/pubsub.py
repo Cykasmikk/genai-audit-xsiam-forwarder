@@ -137,20 +137,23 @@ class PubSubEgress:
     @staticmethod
     def _openai_conversations_attrs(ev: dict, attrs: dict) -> None:
         # Wrapped payload from openai_conversations adapter:
-        #   {"conversation": {convo meta}, "message": {message body}}
-        # OR the message-level shape directly if the spec returns flat records.
-        convo = ev.get("conversation") or {}
-        message = ev.get("message") if "message" in ev else ev
-        if isinstance(convo.get("id"), str):
-            attrs["conversation_id"] = convo["id"][:128]
-        if isinstance(convo.get("workspace_id"), str):
-            attrs["workspace_id"] = convo["workspace_id"][:64]
-        if isinstance(message.get("role"), str):
-            attrs["message_role"] = message["role"][:32]
-        if isinstance(message.get("model"), str):
-            attrs["model"] = message["model"][:64]
-        # Fallback: actor_user_id at the message level
-        if isinstance(message.get("user_id"), str):
-            attrs["actor_user_id"] = message["user_id"][:256]
-        elif isinstance(convo.get("user_id"), str):
-            attrs["actor_user_id"] = convo["user_id"][:256]
+        #   {"file_id": "...", "list_entry": {scope-meta}, "record": {raw JSONL line}}
+        # The record schema varies by event_type. Extract whatever fields
+        # are commonly present.
+        file_id = ev.get("file_id")
+        if isinstance(file_id, str):
+            attrs["log_file_id"] = file_id[:128]
+        list_entry = ev.get("list_entry") or {}
+        if isinstance(list_entry.get("event_type"), str):
+            attrs["event_type"] = list_entry["event_type"][:64]
+        record = ev.get("record") or {}
+        if isinstance(record.get("conversation_id"), str):
+            attrs["conversation_id"] = record["conversation_id"][:128]
+        if isinstance(record.get("workspace_id"), str):
+            attrs["workspace_id"] = record["workspace_id"][:64]
+        if isinstance(record.get("user_id"), str):
+            attrs["actor_user_id"] = record["user_id"][:256]
+        if isinstance(record.get("role"), str):
+            attrs["message_role"] = record["role"][:32]
+        if isinstance(record.get("model"), str):
+            attrs["model"] = record["model"][:64]

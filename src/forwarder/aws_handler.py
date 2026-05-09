@@ -43,6 +43,9 @@ def _make_client(vendor: str, api_key_secret_arn: str) -> AuditClient:
     if vendor == "openai":
         return OpenAIAuditClient(api_key)
     if vendor == "openai_conversations":
+        # principal_id (workspace UUID or org id) is sourced from the
+        # OPENAI_PRINCIPAL_ID env var; OPENAI_PRINCIPAL_SCOPE env var
+        # picks workspaces (default) vs organizations.
         return OpenAIConversationsClient(api_key)
     raise ValueError(
         f"Unsupported VENDOR={vendor!r}. Supported: "

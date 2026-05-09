@@ -88,15 +88,21 @@ class HttpEgress:
             t = _unix_to_iso(int(ts)) if isinstance(ts, (int, float)) else None
             ev_type = ev.get("type")
         elif v == "openai_conversations":
-            msg = ev.get("message") if "message" in ev else ev
-            ts = msg.get("effective_at") or msg.get("created_at")
+            # Wrapped payload: {file_id, list_entry, record}
+            record = ev.get("record") or {}
+            ts = (
+                record.get("created_at")
+                or record.get("timestamp")
+                or record.get("effective_at")
+            )
             if isinstance(ts, (int, float)):
                 t = _unix_to_iso(int(ts))
             elif isinstance(ts, str):
                 t = ts
             else:
                 t = None
-            ev_type = "openai_conversation_message"
+            list_entry = ev.get("list_entry") or {}
+            ev_type = list_entry.get("event_type") or "openai_compliance_log"
         else:
             t = ev.get("created_at") or ev.get("effective_at")
             ev_type = ev.get("type")

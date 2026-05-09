@@ -68,74 +68,75 @@ against the upstream OpenAI documentation directly.
 51 documented event types — see
 [docs/coverage.md](../coverage.md#openai--audit-logs-api-51-event-types).
 
-## `openai_conversations` — ChatGPT conversation content
+## `openai_conversations` — Compliance Logs Platform
 
-> **⚠️ Skeleton adapter.** The Compliance Logs Platform conversations
-> endpoint is not publicly documented as of May 2026. The adapter
-> ships with educated defaults aligned with the sibling Audit Logs
-> API conventions, marked with `TODO(openai-conversations-spec)` at
-> every uncertain point.
+Conforms to the OpenAI cookbook spec at
+<https://developers.openai.com/cookbook/examples/chatgpt/compliance_api/logs_platform>.
 
-### Three paths to make this feed production-ready
+The Compliance Logs Platform is **architecturally different** from the
+Audit Logs API:
 
-#### Path A (best): use Palo Alto Networks' native integration
+- **Different host:** `api.chatgpt.com` (not `api.openai.com`)
+- **Different key:** Compliance API key (provisioned via Compliance
+  Platform onboarding) — distinct from the Admin key used for
+  `/v1/organization/audit_logs`
+- **Two-stage delivery:** list JSONL log files, then download each
+  one's content. Each downloaded file is JSONL — one event per line
+- **Workspace-scoped:** path is
+  `/v1/compliance/{scope}/{principal_id}/logs` where `scope` is
+  `workspaces` or `organizations` and `principal_id` is the workspace
+  UUID or `org-…` id
 
-Per a Palo Alto community blog post in 2026, XSIAM has native support
-for OpenAI ChatGPT Enterprise Compliance ingestion. Ask your XSIAM TAM
-whether your tenant has the **OpenAI ChatGPT Enterprise Compliance**
-data source available; if yes, prefer it over our skeleton — Palo
-maintains spec drift. Don't deploy `openai_conversations` from this
-repo in that case.
+### Configuration
 
-#### Path B: get the spec from your OpenAI rep
+The adapter requires:
 
-Override the placeholder via env var if the path differs:
+| Env var | Default | Purpose |
+|---|---|---|
+| `OPENAI_PRINCIPAL_ID` | *required* — adapter fails closed if unset | Workspace UUID, or `org-…` id when scope=organizations |
+| `OPENAI_PRINCIPAL_SCOPE` | `workspaces` | Either `workspaces` or `organizations` |
+| `OPENAI_EVENT_TYPE` | unset (full-take) | Optional event-type filter (e.g. `conversations`, `auth`) |
+| `OPENAI_COMPLIANCE_API_BASE` | `https://api.chatgpt.com` | Override for spec drift |
+| `OPENAI_COMPLIANCE_LOGS_PATH_TEMPLATE` | `/v1/compliance/{scope}/{principal_id}/logs` | Override for spec drift |
 
-```
-OPENAI_CONVERSATIONS_PATH=/v1/<actual_path>
-OPENAI_WORKSPACE_ID=<your workspace id>
-```
+The Compliance API key is the value of the `api_keys.openai_conversations`
+Terraform variable. Its prefix is not publicly documented, so the
+adapter doesn't enforce a specific prefix — it just requires
+non-empty.
 
-If query parameter names or response shape differ, edit constants at
-the top of `src/forwarder/vendors/openai_conversations.py`. Common
-edits:
+### Pagination model
 
-- `PARAM_LIMIT`, `PARAM_AFTER`, `PARAM_EFFECTIVE_AT_GTE/LTE` if the
-  spec differs from the Audit Logs convention
-- `RESP_DATA`, `RESP_HAS_MORE`, `RESP_LAST_ID` if response keys differ
-- The branching in `fetch_window` between per-message and
-  per-conversation response shapes — current code defensively handles
-  both but you may want to commit to one once you have the spec
+Two-stage:
 
-After editing, the smoke test in `tests/smoke.py` includes:
+1. **List file pass:** repeatedly `GET …/logs?limit=&after=ISO8601&event_type=…`
+   feeding `last_end_time` from the previous response back as `after`,
+   until `has_more=false`.
+2. **Download pass:** for each `file_id` in the listing, `GET …/logs/{id}`
+   (urllib3 follows the signed-URL redirect by default). Parse the
+   JSONL body, yield one `AuditEvent` per non-empty line.
 
-- `test_openai_conversations_handles_per_message_response`
-- `test_openai_conversations_handles_per_conversation_response`
-- `test_openai_conversations_synthesizes_id_when_missing`
+Files whose `end_time` is past the upper bound of the requested
+window are skipped client-side so the same window can be replayed
+cleanly under the watermark+overlap dedupe model.
 
-These should still pass — they're shape-tolerant.
+### Common pitfalls
 
-#### Path C: deploy and iterate against real responses
+- **`OPENAI_PRINCIPAL_ID` not set** — the adapter raises at
+  construction time. Set it on the Lambda env (AWS) or Cloud Function
+  env (GCP) via Terraform, or paste in the Workspace ID from your
+  Compliance Platform onboarding screen.
+- **Using the Admin key (`sk-admin-`) instead of the Compliance API
+  key** — different key types, different scopes. The Compliance API
+  key is issued during the Compliance Platform onboarding flow.
+- **Pointing at `api.openai.com`** — wrong host. Use `api.chatgpt.com`.
 
-Deploy the skeleton against a low-traffic OpenAI org with audit
-logging enabled. Read the 400 / 404 error bodies — OpenAI returns
-specific messages naming unrecognized query params. Iterate.
+### Alternative: Palo Alto's native integration
 
-### Defensive features in the skeleton
-
-- **Both response shapes handled.** If the API returns flat per-message
-  records (`data: [{id, effective_at, role, content}]`), we yield each
-  as one event. If it returns per-conversation records with embedded
-  messages (`data: [{id, messages: [...]}]`), we unpack and yield each
-  message with the conversation metadata wrapped in.
-
-- **Synthetic IDs.** If a record lacks an `id` field, the adapter
-  computes a stable SHA-256 hash of the canonical-JSON-serialized
-  record as `synthetic_<hash>` so dedupe still works.
-
-- **404 message points at alternatives.** When the endpoint isn't
-  found, the error message names both the env-var override and Palo
-  Alto's native integration as alternatives.
+Per a Palo Alto community post in 2026, XSIAM has native support for
+OpenAI ChatGPT Enterprise Compliance. If your tenant has the **OpenAI
+ChatGPT Enterprise Compliance** data source available in the XSIAM UI,
+prefer it over this adapter — Palo maintains spec drift. Both options
+are documented; pick whichever fits your XSIAM data-source strategy.
 
 ## Self-audit
 
